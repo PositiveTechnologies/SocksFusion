@@ -1,0 +1,27 @@
+# object files
+*.o
+*.hi
+*.pyc
+
+# build dirs
+*.stack-work
+.ropeproject
+agents/*
+build
+.pack
+
+# temporary files
+*.swp
+*.orig
+
+# other
+*dist
+version
+output
+*.log
+SocksFusion.zip
+test/bench
+
+# private files
+res/privateKey.key
+res/proxy.bbs.ptsecurity.com.pfx
