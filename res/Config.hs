@@ -7,7 +7,7 @@ import Network.Socket (PortNumber)
 import Data.ByteString (ByteString)
 
 token :: ByteString
-token = "token"
+token = "{personal_token}"
 
 proxy :: (PortNumber, ByteString)
 proxy = (443, "proxy.bbs.ptsecurity.com")

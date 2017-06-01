@@ -21,6 +21,7 @@ output
 *.log
 SocksFusion.zip
 test/bench
+src/Proxy.hs
 
 # private files
 res/privateKey.key
