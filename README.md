@@ -1,8 +1,8 @@
 # SocksFusion
 
-SocksFusion - утилита для проброса TCP-сообщений по шифрованному туннелю сквозь сетевой экран, выглядящее для клиентских приложений как сервер Socks5. Состоит из двух компонентов: **Proxy**, устанавливаемый на нашей стороне и обеспечивающий идентификацию агентов, и **Agent**, распространяемое приложение, устанавливающее соединение с Proxy.
+SocksFusion is a utility used to forward TCP messages via an encrypted tunnel through a firewall which client applications see as a Socks5 server. SocksFusion contains two components: **Proxy** which is installed on our side and provides agent identification and **Agent** which is a redistributable application connecting to Proxy.
 
-Приблизительная схема сетевых соединений:
+Outline of network connections:
 
                                      NAT
     +--------+         +-------+     | |     +-------+         +--------+
@@ -12,19 +12,19 @@ SocksFusion - утилита для проброса TCP-сообщений по
 
 ## Agent
 
-Agent устанавливает соединение с Proxy по адресу proxy.bbs.ptsecurity.com:443 и пытается идентифицироваться по указанному ключу. Если попытка успешна, то пытается отвечать на проброшенные клиентские пакеты и открывать соединения с целью, запрошенной в соответствии с протоколом Socks5.
+Agent connects to Proxy at proxy.bbs.ptsecurity.com:443 and attempts to identify itself using the specified key. If it succeeds, Agent attempts to reply to forwarded client packets and establish connections with a target requested according to the Socks5 protocol.
 
-### Отладочные сообщения
+### Debug messages
 
-В течение работы Агент может писать отладочные сообщения в stdout, сопровождаемые меткой времени: 
-* `Connecting to server...` - пытаемся соединиться с Proxy. 
-* `Connection established` - Агент установил TLS соединение с Proxy. 
-* `This agent is not registered` - ключ агента не зарегистрирован в системе, скорее всего, была сделана ещё одна верификация. 
-* `Another agent already connected` - с данным ключом уже работает другой агент. Агент будет пытаться переподключиться с тем же ключом каждые пять секунд. 
-* `Scan is started` - пришёл запрос на сканирование, теперь Агент работает как Socks5 сервер. 
-* `Running` - периодическое сообщение от Proxy, соединение в порядке. 
-* `Target is unreachable: <address>` - не удаётся связаться с указанным адресом. Если это сообщение повторяется, то, возможно, что-то блокирует исходящие соединения или имеются неполадки в сети. 
+During its operation, Agent can write the following timestamped debug messages to stdout:
+* `Connecting to server...` - Agent is attempting to connect to Proxy.
+* `Connection established` - Agent has established a TLS connection to Proxy.
+* `This agent is not registered` - The Agent key is not registered in the system. This can happen if you download and verify a new copy of Agent.
+* `Another agent already connected` - Another agent is using the same key. Agent tries to reconnect using the same key every 5 seconds.
+* `Scan is started` - A scan request has been received. Agent is working as a Socks5 server.
+* `Running` - A periodic message from Proxy. The connection is working properly.
+* `Target is unreachable: <address>` - Failed to connect to the specified address. If this message appears again, something may be blocking outbound connections, or it may indicate network problems.
 
 ## Proxy
 
-Служит прокси сервером для входящих соединений от агентов и клиентов (инстансов сканера). Устанавливает защищённое TLS соединение с агентами и в течение всего сканирования пробрасывает по нему сообщения от клиентов.
+Proxy serves as a proxy server for inbound connections from agents and clients (scanner instances). Proxy establishes an encrypted TLS connection to agents and uses it to forward messages from clients during a scan.
