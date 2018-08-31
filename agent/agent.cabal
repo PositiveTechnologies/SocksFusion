@@ -1,0 +1,112 @@
+name:                  agent
+version:               1.4
+stability:             stable on all operating systems
+synopsis:              BBS saas agent
+description:           BBS saas agent
+license:               GPL-3
+license-file:          LICENSE
+category:              System, Network
+maintainer:            Stepanov Boris (bstepanov@ptsecurity.com)
+build-type:            Simple
+tested-with:           GHC == 8.2.2
+cabal-version:         >= 1.24
+bug-reports:           https://github.com/PositiveTechnologies/SocksFusion/issues
+
+source-repository head
+  type:                git
+  location:            git://github.com/PositiveTechnologies/SocksFusion
+  subdir:              agent
+
+flag threaded
+  description:         use threaded runtime
+  default:             True
+
+flag production
+  description:         use production urls
+  default:             True
+
+flag stage
+  description:         use stage urls
+  default:             True
+
+executable Agent
+  hs-source-dirs:      src, res
+  main-is:             Agent.hs
+  other-modules:       Paths_agent
+  autogen-modules:     Paths_agent
+  build-depends:       SocksFusion      >= 1.3
+                     , aeson            >= 1.2
+                     , ansi-wl-pprint   >= 0.6
+                     , base             >= 4.9 && <5
+                     , binary           >= 0.8.5
+                     , bytestring       >= 0.10.8
+                     , connection       >= 0.2
+                     , containers       >= 0.5.10
+                     , data-default-class >= 0.1.2
+                     , directory        >= 1.3
+                     , fast-logger      >= 2.4
+                     , file-embed       >= 0.0.10
+                     , filepath         >= 1.4
+                     , http-client      >= 0.5
+                     , http-client-tls  >= 0.3
+                     , network          >= 2.6
+                     , optparse-applicative >= 0.13
+                     , process          >= 1.4
+                     , stm              >= 2.4.4
+                     , template-haskell >= 2.11.1
+                     , text             >= 1.2
+                     , time             >= 1.6
+                     , tls              >= 1.4.0
+                     , unordered-containers >= 0.2
+                     , x509-store       >= 1.6.2
+                     , x509-validation  >= 1.6.2
+  default-language:    Haskell2010
+  ghc-options:         -Wall -Werror
+
+  cpp-options:         -DAPI="https://bbs.ptsecurity.com" -DPROXY="proxy.bbs.ptsecurity.com:443"
+
+  if flag(threaded) && !os(windows) && !arch(arm)
+    ghc-options:       -threaded -rtsopts
+
+Test-Suite tests
+  type:                exitcode-stdio-1.0
+  other-modules:       Agent
+                     , Paths_agent
+  autogen-modules:     Paths_agent
+  main-is:             Test.hs
+  hs-source-dirs:      src, test
+  build-depends:       SocksFusion      >= 1.3
+                     , aeson            >= 1.2
+                     , ansi-wl-pprint   >= 0.6
+                     , base             >= 4.9 && <5
+                     , binary           >= 0.8.5
+                     , bytestring       >= 0.10.8
+                     , connection       >= 0.2
+                     , containers       >= 0.5.10
+                     , data-default-class >= 0.1.2
+                     , directory        >= 1.3
+                     , fast-logger      >= 2.4
+                     , file-embed       >= 0.0.10
+                     , filepath         >= 1.4
+                     , http-client      >= 0.5
+                     , http-client-tls  >= 0.3
+                     , network          >= 2.6
+                     , optparse-applicative >= 0.13
+                     , process          >= 1.4
+                     , stm              >= 2.4.4
+                     , template-haskell >= 2.11.1
+                     , text             >= 1.2
+                     , time             >= 1.6
+                     , tls              >= 1.4.0
+                     , unordered-containers >= 0.2
+                     , x509-store       >= 1.6.2
+                     , x509-validation  >= 1.6.2
+                     -- TESTS
+                     , mocks            >= 2.1
+                     , HUnit            >= 1.5
+                     , QuickCheck       >= 2.9
+                     , hspec            >= 2.4
+  default-language:    Haskell2010
+  ghc-options:         -O0
+  cpp-options:         -DTEST
+  cpp-options:         -DAPI="http://web.rd.ptsecurity.ru" -DPROXY="proxy.rd.ptsecurity.ru:443"

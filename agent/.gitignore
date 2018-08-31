@@ -1,0 +1,30 @@
+*.swp
+*.swo
+
+# build files
+*.o
+*.hi
+*.pyc
+*/dist
+*.stack-work
+build
+
+# other
+*.fifo
+./version
+*.log
+*.out
+*.bkp
+.ropeproject
+
+# test files
+local
+local_full
+remote
+remote_full
+
+# mocks
+tests/mocks/*
+!tests/mocks/config.xml
+!tests/mocks/we_server.py
+!tests/mocks/we_client.py
