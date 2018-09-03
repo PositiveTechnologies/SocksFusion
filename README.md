@@ -19,20 +19,20 @@ Network connection diagram:
 The **agent** is a client application that forwards requests from the scanner. When launched, it connects with the **proxy**, performs a handshake, and sends its **token**. If authorization is successful, you can start scanning via the agent. The agent listens to the proxy and responds to requests in accordance with Socks5.
 
 ### Running the agent
-
-Usage: Agent [-o|--once] [-v|--version] [-s|--show-info]
+```
+Usage: Agent [-o|--once] [-d|--debug] [-s|--show-info]
 
 Available options:
-  -p,--proxy host:port     Use indicated proxy server
-  -a,--api url             Use indicated API server address
-  --token string           Use indicated token
-  --token-path path        Use indicated path to read/write token
-  -i,--insecure            Keep going if SSL certificate cannot be verified
-  -o,--once                Exit when scanning completes or an error occurs
-  -d,--debug               Show packet debugging information
-  -s,--show-info           Show agent version and build date
-  -h,--help                Show this help text
-
+  -p,--proxy host:port     Use indicated proxy server (example: proxy.bbs.ptsecurity.com:443) 
+  -a,--api url             Use indicated API server address (example: https://bbs.ptsecurity.com) 
+  --token string           Use indicated token 
+  --token-path path        Use indicated path to read/write token 
+  -i,--insecure            Keep going if SSL certificate cannot be verified 
+  -o,--once                Exit when scanning completes or an error occurs 
+  -d,--debug               Show packet debugging information 
+  -s,--show-info           Show agent version and build date 
+  -h,--help                Show this help text 
+```
 ## Proxy
 
 The **proxy** is the server responsible for connecting agents and clients (scanner instances). The **proxy** makes the Socks5 interface available to client applications.
