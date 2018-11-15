@@ -20,18 +20,23 @@ The **agent** is a client application that forwards requests from the scanner. W
 
 ### Running the agent
 ```
-Usage: Agent [-o|--once] [-d|--debug] [-s|--show-info]
+Usage: Agent [string] [-a|--api URL] [--tutorial] [-s|--skip] [-i|--insecure]
+             [-d|--debug] [-o|--once] [--token-path filepath]
+             [-p|--proxy host:port] [--token string] [-v|--version]
 
 Available options:
-  -p,--proxy host:port     Use indicated proxy server (example: proxy.bbs.ptsecurity.com:443) 
-  -a,--api url             Use indicated API server address (example: https://bbs.ptsecurity.com) 
-  --token string           Use indicated token 
-  --token-path path        Use indicated path to read/write token 
-  -i,--insecure            Keep going if SSL certificate cannot be verified 
-  -o,--once                Exit when scanning completes or an error occurs 
-  -d,--debug               Show packet debugging information 
-  -s,--show-info           Show agent version and build date 
-  -h,--help                Show this help text 
+  string                   Specify activation code
+  -a,--api URL             Use indicated API server address
+  --tutorial               Run interactive tutorial
+  -s,--skip                Use default configuration
+  -i,--insecure            Keep going if SSL certificate cannot be verified
+  -d,--debug               Show packet debugging information
+  -o,--once                Exit when scanning completes
+  --token-path filepath    Use indicated path to read/write token
+  -p,--proxy host:port     Use indicated proxy server 
+  --token string           Use indicated token
+  -v,--version             Show agent version
+  -h,--help                Show this help text
 ```
 ## Proxy
 

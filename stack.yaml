@@ -1,6 +1,6 @@
 build:
     split-objs: true
-resolver: lts-11.10
+resolver: lts-11.22
 packages:
-- agent
-- socksfusion
+    - agent
+    - socksfusion

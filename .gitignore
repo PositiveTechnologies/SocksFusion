@@ -11,10 +11,18 @@ build
 
 # other
 *.fifo
-./version
 *.log
 *.out
 *.bkp
 .ropeproject
 *.orig
+*.dot
 tags
+*.tix
+.mypy_cache
+
+# test files
+local
+local2
+remote
+*.token

@@ -1,33 +1,28 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE ImplicitPrelude #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 
 #ifdef TEST
-module Agent (loadM) where
+module Agent () where
 #endif
 
-import           Prelude         hiding (log)
-import qualified Paths_agent            (version)
+import           Prelude             hiding (interact, log)
+import           Agent.Types
+import           Agent.Console
+--import           Agent.Graphics
 
 import           Network.SocksFusion hiding (pVersion)
-import qualified Network.SocksFusion    (pVersion)
 import           Network.Socks5
 
-import           Language.Haskell.TH    (runIO, stringE)
-import           Data.FileEmbed         (embedFile)
-import           System.IO
+import           System.IO           hiding (interact)
 import           System.IO.Error
-import           System.Exit            (exitSuccess, ExitCode(..), exitWith)
-import           System.Process         (readProcess)
-import           System.Directory       (createDirectoryIfMissing, getAppUserDataDirectory)
-import           System.FilePath.Posix  ((</>))
+import           System.Exit
+import           System.Directory
+import           System.FilePath            (takeDirectory)
 import           Data.Time.Clock
 import           Data.Time.Clock.System
 import           Data.Time.Clock.TAI
@@ -36,8 +31,7 @@ import           Control.Exception
 import           Control.Concurrent
 import           Control.Concurrent.STM
 
-import           Network.Socket         (socketToHandle)
-import           Network.TLS     hiding (Version)
+import           Network.TLS
 import           Network.TLS.Extra
 import           Data.X509.CertificateStore (makeCertificateStore)
 import           Data.X509.Memory       (readSignedObjectFromMemory)
@@ -45,124 +39,123 @@ import           Data.X509.Validation   (validateDefault)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Connection  as HTTP
 import qualified Network.HTTP.Client.TLS as HTTP
+import qualified Network.HTTP.Types.Status as HTTP
+import qualified Network.HTTP.Types.Header as HTTP
 
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 import           Options.Applicative hiding (command, Alternative(..))
-import           System.Log.FastLogger
 
-import           Data.Aeson             (decode, Value(..))
-import qualified Data.HashMap.Strict as HM
-import           Data.Binary     hiding (decode)
-import           Data.Binary.Get
+import           Data.Aeson
+import           Data.Aeson.Types       (parse)
+import           Data.Aeson.Parser      (decodeWith)
+import qualified Data.Binary         as B (Binary(..))
+import           Data.Binary.Get hiding (skip)
 import           Data.Binary.Put
 
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.ByteString.Char8 as BC
-import qualified Data.ByteString     as B
 import qualified Data.ByteString.Lazy.Char8 as BL
+import           Data.Text              (Text)
+import qualified Data.Text           as T
 import qualified Data.Text.Encoding  as T
+import           Text.Printf
+
 import           Control.Monad
+import           Control.Arrow          ((&&&), (>>>))
+import           Control.Monad.State.Lazy
+import           Control.Monad.Reader
 import           Data.Functor
 import           Data.Default.Class
 import           Data.Version
-import           Text.Printf
+import           Data.Monoid
+import           Data.List              (nub)
+import           Data.Char              (isAlphaNum)
 
---------------------------------------- Constants -------------------------------------------------
+--------------------------------------- Configuration ------------------------------------
 
-proxyUrl :: AddrPort
-proxyUrl = read PROXY
+parseRun :: Parser RunConfig
+parseRun = do
+  tutorial <- switch $ long "tutorial"
+                    <> help "Run interactive tutorial"
+  skip <- switch $ long "skip"
+                <> short 's'
+                <> help "Use default configuration"
+  ignore <- switch $ long "insecure"
+                  <> short 'i'
+                  <> help "Keep going if SSL certificate cannot be verified"
+  debug <- switch $ long "debug"
+                 <> short 'd'
+                 <> help "Show packet debugging information"
+  once <- switch $ long "once"
+                <> short 'o'
+                <> help "Exit when scanning completes"
+  pure $ RunConfig { runTutorial = tutorial
+                   , skipAll = skip
+                   , ignoreSSL = ignore
+                   , debugConn = debug
+                   , oneRun = once }
 
-apiUrl :: ApiURL
-apiUrl = API
+parseApi :: Parser ApiConfig
+parseApi = do
+  code <- strArgument $ value ""
+                     <> metavar "string"
+                     <> help "Specify activation code"
+  url <- option auto $ long "api"
+                    <> short 'a'
+                    <> showDefault
+                    <> value aPIURL
+                    <> metavar "URL"
+                    <> help "Use indicated API server address"
+  pure $ ApiConfig url code
 
-certificate :: B.ByteString
-certificate = $(embedFile "res/rootCert.pem")
+parseToken :: FilePath -> Parser TokenConfig
+parseToken appdata = do
+  tokenP <- strOption $ long "token-path"
+                     <> showDefaultWith id
+                     <> action "filenames"
+                     <> value (appdata <> "/" <> tOKENFILE)
+                     <> metavar "filepath"
+                     <> help "Use indicated path to read/write token"
+  pure $ TokenConfig tokenP
 
-buildDate :: String
-buildDate = $(runIO (readProcess "date" ["+%d %b %G"] "") >>= stringE)
+parseProxy :: Parser ProxyConfig
+parseProxy = do
+  url <- option auto $ long "proxy"
+                    <> short 'p'
+                    <> showDefault
+                    <> value pROXYADDR
+                    <> metavar "host:port"
+                    <> help "Use indicated proxy server"
+  token <- strOption $ long "token"
+                    <> value ""
+                    <> metavar "string"
+                    <> help "Use indicated token"
+  pure $ ProxyConfig url (if BC.null token then Nothing else Just token)
 
-version :: String
-version = showVersion Paths_agent.version
+options :: FilePath -> Parser Config
+options appdata = do
+  apiC <- parseApi
+  runC <- parseRun
+  tokenC <- parseToken appdata
+  proxyC <- parseProxy
+  _ <- infoOption (unlines $ [ "Agent version: " <> showVersion aVersion
+                             , "Protocol version: " <> showVersion pVersion ]
+                          <> maybe [] (pure . ("Build version: " <>)) buildVersion
+                          <> [ "Build date: " <> buildDate ])
+                $ long "version"
+               <> short 'v'
+               <> help "Show agent version"
+  pure $ Config runC apiC tokenC proxyC
 
-pVersion :: Version
-pVersion = Network.SocksFusion.pVersion
+parserInfo :: FilePath -> ParserInfo Config
+parserInfo appdata = info (options appdata <**> helper)
+                        $ header "SocksFusion forwarding agent"
+                       <> fullDesc
+                       <> failureCode errorConfiguration
 
-tokenFile :: String
-tokenFile = "RemoteAgent.token"
+--------------------------------------- Serialisation ------------------------------------
 
-errorConfiguration :: Int
-errorConfiguration = 1
-errorTLS :: Int
-errorTLS = 3
-errorNotRegistered :: Int
-errorNotRegistered = 4
-errorDuplicate :: Int
-errorDuplicate = 5
-errorPermissions :: Int
-errorPermissions = 6
-errorNetwork :: Int
-errorNetwork = 7
-errorObsolete :: Int
-errorObsolete = 8
-errorPuzzle :: Int
-errorPuzzle = 9
-errorUnknown :: Int
-errorUnknown = 40
-
---------------------------------------- Configuration ---------------------------------------------
-
-type Ignore = Bool
-type Once = Bool
-type Debug = Bool
-type ApiURL = String
-
-data Configuration = Run AddrPort ApiURL (Maybe B.ByteString) (Maybe FilePath) Ignore Once Debug
-                   | ShowBuildInfo
-
-options :: Parser Configuration
-options = do
-  proxy  <- option auto (long "proxy"    <> short 'p' <> value proxyUrl <> metavar "HOST:PORT"
-                     <> hidden <> help "Use custom Proxy server")
-  api    <- strOption   (long "api"      <> short 'a' <> value apiUrl   <> metavar "URL"
-                     <> hidden <> help "Use custom API address")
-  token  <- strOption   (long "token"                <> value ""       <> metavar "STRING"
-                     <> hidden <> help "Use custom token")
-  tokenP <- strOption   (long "token-path"           <> value ""       <> metavar "PATH"
-                     <> hidden <> help "Use custom token file")
-  insec  <- switch     (long "insecure"  <> short 'i'
-                     <> hidden <> help "Do not verify TLS certificate")
-  once   <- switch     (long "once"      <> short 'o'
-                              <> help "Exit agent after any break")
-  debug  <- switch     (long "debug"     <> short 'd'
-                              <> help "Print debug info")
-  si     <- switch     (long "show-info" <> short 's'
-                              <> help "Show agent info")
-  pure $ if si then ShowBuildInfo
-               else Run proxy api (if null token then Nothing else Just $ BC.pack token)
-                                  (if null tokenP then Nothing else Just tokenP) insec once debug
-
-parserInfo :: ParserInfo Configuration
-parserInfo = info (options <**> helper) (header "SocksFusion forwarding agent"
-                                       <> fullDesc <> failureCode errorConfiguration)
-
---------------------------------------- Utils -----------------------------------------------------
-
-client :: (?log :: LogStr -> IO ()) => HostName -> Ignore -> ClientParams
-client host ignore = (defaultParamsClient host "") {
-   clientShared    = def { sharedCAStore = makeCertificateStore ca }
- , clientHooks     = def { onServerCertificate = validate }
- , clientSupported = def { supportedVersions = [TLS12]
-                         , supportedCiphers  = ciphersuite_default
-                         , supportedSession  = False }}
-  where
-  ca = readSignedObjectFromMemory certificate
-  validate cs vc sid cc = do
-    errs <- validateDefault cs vc sid cc
-    if ignore then mapM_ (\e -> ?log ("Warning: " <> toLogStr (show e))) errs $> mempty
-              else mapM  (\e -> ?log ("Error: " <> toLogStr (show e)) $> e) errs
-
-putArrow :: Binary a => MVar Arrow -> Int -> a -> IO ()
-putArrow mvar ah = putMVar mvar . Arrow ah . BL.toStrict . runPut . put
+putArrow :: B.Binary a => MVar Arrow -> Int -> a -> IO ()
+putArrow mvar ah = putMVar mvar . Arrow ah . BL.toStrict . runPut . B.put
 
 -- | Deserialise bytestring from the handle with the format:
 --
@@ -189,195 +182,269 @@ msgWrite :: Handle -> BL.ByteString -> IO ()
 msgWrite h msg = BL.hPut h $ runPut $ putWord32le (fromIntegral $ BL.length msg)
                                    >> putLazyByteString msg
 
---------------------------------------- Main ------------------------------------------------------
+--------------------------------------- Utils --------------------------------------------
 
-loadLocal :: FilePath -> IO (Maybe (B.ByteString, FilePath))
-loadLocal path = catch (pure . (,path) <$> B.readFile path) (\(_ :: SomeException) -> return mempty)
-loadM :: (Foldable t, Monad m) => (a -> m (Maybe b)) -> t a -> m (Maybe b)
-loadM f = foldM (\case { Nothing -> f; x -> const $ return x }) Nothing
-loadRemote :: (?log :: LogStr -> IO ()) => ApiURL -> B.ByteString -> Ignore -> IO B.ByteString
-loadRemote url code ignore = do
-  errReq <- HTTP.parseUrlThrow url
-  let req = errReq { HTTP.method = "POST"
-                   , HTTP.path = "/_xhr/activate-agent"
-                   , HTTP.requestBody = HTTP.RequestBodyBS ("code=" <> code) }
-  let manager = HTTP.mkManagerSettings (HTTP.TLSSettingsSimple ignore False False) Nothing
-  resp <- HTTP.newManager manager >>= HTTP.httpLbs req
-  let body = HTTP.responseBody resp
-  let decodeError = ?log ("Cannot parse response: " <> toLogStr body)
-                 >> exitWith (ExitFailure errorNetwork)
-  case decode body of
-    Just (Object dict) -> case HM.lookup "token" dict of
-      Just (String token) -> return $ T.encodeUtf8 token
-      _                   -> decodeError
-    _                  -> decodeError
+tryIO :: (MonadIO m) => IO a -> m (Either IOException a)
+tryIO = liftIO . try
 
-getToken :: (?log :: LogStr -> IO ())
-         => TimedFastLogger -> Maybe FilePath -> ApiURL -> Ignore -> IO B.ByteString
-getToken tlog mpath url ignore = (do
-  appdata <- getAppUserDataDirectory "bbs"
-  maybe (loadM loadLocal $ map (</> tokenFile) [appdata, "."]) loadLocal mpath >>= \case
-    Just (token, loc) -> do
-      ?log ("Found saved token in " <> toLogStr loc)
-      return token
-    Nothing    -> do
-      ?log "Token file was not found, connecting to API server"
-      tlog (const "Enter activation code: ")
-      hFlush stdout
-      code <- B.getLine
-      token <- loadRemote url code ignore
-      try (saveAs appdata token `catch` (\(_ :: SomeException) -> saveAs "." token)) >>= \case
-        Right path               -> ?log ("Token was saved in " <> toLogStr path) $> token
-        Left (e :: SomeException) -> ?log "Cannot save token here nor in home directory"
-                                >> ?log (toLogStr $ show e)
-                                >> exitWith (ExitFailure errorPermissions)) `catches` [
-    Handler (\(e :: ExitCode) -> throw e)
-    -- TODO: pretty print of socket error
-  , Handler (\case
-                HTTP.HttpExceptionRequest _ (HTTP.StatusCodeException s _) -> do
-                  ?log ("Fail to connect API server: " <> toLogStr (show $ HTTP.responseStatus s))
-                  exitWith (ExitFailure errorNetwork)
-                HTTP.HttpExceptionRequest _ e -> do
-                  ?log ("Fail to connect API server: " <> toLogStr (show e))
-                  exitWith (ExitFailure errorNetwork)
-                e -> do
-                  ?log ("Fail to connect API server: " <> toLogStr (show e))
-                  exitWith (ExitFailure errorNetwork)) ]
+showT :: Show s => s -> Text
+showT = T.pack . show
+
+type Interactive = (InputChannel, OutputChannel)
+type Logger = Text -> IO ()
+
+log :: (MonadIO m, MonadReader Interactive m) => Text -> m ()
+log = writeOutput . ShowMessage
+
+--------------------------------------- Functions ----------------------------------------
+
+client :: Logger -> HostName -> Bool -> ClientParams
+client logIO host ignore = (defaultParamsClient host "") {
+   clientShared    = def { sharedCAStore = makeCertificateStore ca }
+ , clientHooks     = def { onServerCertificate = validate }
+ , clientSupported = def { supportedVersions = [TLS12]
+                         , supportedCiphers  = ciphersuite_default
+                         , supportedSession  = False }}
   where
-  saveAs path token = do
-    createDirectoryIfMissing False path
-    B.writeFile (path </> tokenFile) token
-    return $ path </> tokenFile
+  ca = readSignedObjectFromMemory certificate
+  validate cs vc sid cc = do
+    errs <- validateDefault cs vc sid cc
+    if ignore then mapM_ (\e -> logIO ("Warning: " <> showT e)) errs $> mempty
+              else mapM  (\e -> logIO ("Error: " <> showT e) $> e) errs
 
-run :: (?log :: LogStr -> IO ()) => AddrPort -> B.ByteString -> ClientParams -> Once -> Debug -> IO ()
-run (fh :@: fp) token cli once debug = forever (bracket connAcquire dispose $ \h -> do
+saveTokens :: (MonadIO m, MonadState Config m, MonadReader Interactive m)
+           => [Token] -> m ()
+saveTokens tokens = do
+  path <- gets (tokenConfig >>> tokenPath)
+  loadTokens >>= \case
+    Right tokens' -> tryIO (createDirectoryIfMissing False (takeDirectory path)
+                         >> BL.writeFile path (encode $ nub $ tokens <> tokens'))
+                 >>= either (log . showT)
+                            (const $ log $ "Tokens was saved in " <> T.pack path)
+    Left e -> log $ "Cannot save tokens, " <> showT e
+
+runApi :: (MonadIO m, MonadState Config m, MonadReader Interactive m) => m ()
+runApi = do
+  ignore <- gets (runConfig >>> ignoreSSL)
+  (url, code) <- gets (apiConfig >>> apiURL &&& apiCode)
+  eBody <- liftIO $ try $ do
+    errReq <- HTTP.parseUrlThrow $ safeURL url
+    let req = errReq { HTTP.method = "POST"
+                     , HTTP.path = "/_xhr/activate-agent"
+                     , HTTP.requestHeaders = [(HTTP.hContentType, "application/x-www-form-urlencoded")]
+                     , HTTP.requestBody = HTTP.RequestBodyBS ("code=" <> code) }
+    let mngr = HTTP.mkManagerSettings (HTTP.TLSSettingsSimple ignore False False) Nothing
+    HTTP.responseBody <$> (HTTP.newManager mngr >>= HTTP.httpLbs req)
+  case eBody of
+    Left e -> logHttp e >> writeOutput (FailRun $ ExitFailure errorNetwork)
+    Right body -> case decodeWith json (parse parser) body of
+      Nothing -> do
+        log ("Cannot parse response: " <> T.decodeUtf8 (BL.toStrict body))
+        writeOutput $ FailRun $ ExitFailure errorNetwork
+      Just token -> liftIO getCurrentTime
+                >>= writeOutput . FinishApi . join (Token token)
+  where
+  parser = withObject "dict" $ (.: "token") >=> withText "string" (pure . T.encodeUtf8)
+  logHttp (HTTP.HttpExceptionRequest _ (HTTP.StatusCodeException s _)) = do
+    let HTTP.Status cd msg = HTTP.responseStatus s
+    log $ "Fail to connect API server: " <> case cd of
+      404 -> "URL wasn't found"
+      418 -> "Activation code is invalid"
+      _   -> showT cd <> " " <> T.decodeUtf8 msg
+  logHttp (HTTP.HttpExceptionRequest _ (HTTP.ConnectionFailure _)) =
+    log "Fail to connect API server: target is unreachable"
+  logHttp (HTTP.HttpExceptionRequest _ err) =
+    log $ "Fail to connect API server: " <> showT err
+  logHttp (HTTP.InvalidUrlException _ err) =
+    log $ "Fail to connect API server: " <> showT err
+
+loadTokens :: (MonadIO m, MonadReader Interactive m, MonadState Config m) => m (Either ExitCode [Token])
+loadTokens = do
+  path <- gets (tokenConfig >>> tokenPath)
+  tryIO (BL.readFile path) >>= \case
+    Left e ->
+      return $ if isDoesNotExistError e
+        then Right mempty
+        else Left (ExitFailure errorPermissions)
+    Right content ->
+      if BL.length content == 32 && BL.all isAlphaNum content
+        then do
+          log "Found old token file. Token will be converted in the new format."
+          time <- liftIO getCurrentTime
+          return $ Right [Token (BL.toStrict content) time time]
+        else case eitherDecode content of
+          Left{} -> return $ Left (ExitFailure errorJSON)
+          Right tokens -> return $ Right tokens
+
+runToken :: (MonadIO m, MonadReader Interactive m, MonadState Config m) => m ()
+runToken = do
+  res <- loadTokens
+  case res of
+    Left ec | ec == ExitFailure errorJSON -> log "Token file is not well formatted"
+            | ec == ExitFailure errorPermissions -> log "Cannot read file"
+            | otherwise -> log "Unknown error while reading file"
+    Right{} -> return ()
+  writeOutput $ either FailRun FinishToken res
+
+runProxy :: (MonadIO m, MonadReader Interactive m, MonadState Config m) => m ()
+runProxy = do
+  (ignore, debug) <- gets (runConfig >>> ignoreSSL &&& debugConn)
+  (addr, mToken) <- gets (proxyConfig >>> proxyAddr &&& proxyToken)
+  case mToken of
+    Nothing -> do
+      log "No token was provided"
+      writeOutput $ FailRun (ExitFailure errorConfiguration)
+    Just token -> do
+      logIO <- logO <$> asks snd
+      res <- liftIO (try $ run logIO addr token ignore debug)
+      writeOutput $ FinishProxy $ either id id res
+
+run :: Logger -> AddrPort -> BC.ByteString -> Bool -> Bool -> IO a
+run logIO _ "" _ _ = logIO "Token cannot be empty" >> throwIO (ExitFailure errorConfiguration)
+run logIO (fh :@: fp) token ignore debug = bracket connAcquire dispose $ \h -> do
   testVersion h
   puzzle h
-  bracket (ctxAcquire h) dispose $ \ctx -> do
+  bracket (ctxAcquire h (client logIO (BC.unpack fh) ignore)) dispose $ \ctx -> do
     (quiver, command) <- atomically $ do
       q <- defaultQuiver
       (q,) <$> getTMVar cOMMAND q
     back <- newEmptyMVar
-    tid <- forkFinally (contextRun quiver back ctx (addNew ?log debug quiver back fh)
-                                                  (?log . toLogStr))
-                      (const $ void $ atomically $ tryPutTMVar command "error")
+    void $ forkFinally (contextRun quiver back ctx (addNew logIO debug quiver back fh)
+                                                   (logIO . T.decodeUtf8))
+                       (const $ void $ atomically $ tryPutTMVar command "error")
 
-    ?log "Delivering token..."
+    logIO "Delivering token..."
     putMVar back (Arrow cOMMAND token)
     atomically (takeTMVar command) >>= \case
       "unknown" -> do
-        ?log "This agent is not registered"
-        when once $ exitWith (ExitFailure errorNotRegistered)
+        logIO "This agent is not registered"
+        throwIO (ExitFailure errorNotRegistered)
       "duplicate" -> do
-        ?log "Another agent already connected"
-        when once $ exitWith (ExitFailure errorDuplicate)
+        logIO "Another agent already connected"
+        throwIO (ExitFailure errorDuplicate)
+      "maintenance" -> do
+        logIO "PTBBS is in maintenance mode"
+        throwIO (ExitFailure errorInternal)
       "accepted" -> do
-        ?log "Scan started"
-        void $ atomically $ takeTMVar command
-        ?log "Scan finished"
-        when once exitSuccess
-      _ -> ?log "Connection was broken"
-    killThread tid
-    wait 5) `catches` [
-      Handler (\(e :: AsyncException) -> ?log (toLogStr $ show e) >> exitWith (ExitFailure 2))
-    , Handler (\(e :: TLSException)   -> ?log (toLogStr $ show e) >> exitWith (ExitFailure errorTLS))
-    , Handler (\(e :: ExitCode)       -> throw e)
-    , Handler (\(e :: SomeException)  -> ?log (toLogStr $ show e) >> exitWith (ExitFailure errorUnknown)) ]
-  where
-  testVersion :: (?log :: LogStr -> IO ()) => Handle -> IO ()
-  testVersion h = do
-    ?log "Sending version..."
-    msgWrite h $ runPut $ put pVersion
-    msgRead h >>= \case
-      "matched" -> return ()
+        logIO "Agent is ready, you can start scan now"
+        void (atomically (takeTMVar command))
+        logIO "Scan finished"
+        throwIO ExitSuccess
       _ -> do
-        ?log "This agent is outdated, download a new version from the official website"
-        exitWith (ExitFailure errorObsolete)
-  puzzle :: (?log :: LogStr -> IO ()) => Handle -> IO ()
+        logIO "Connection is broken"
+        throwIO (ExitFailure errorNetwork)
+  where
+  testVersion :: Handle -> IO ()
+  testVersion h = do
+    logIO "Sending version..."
+    msgWrite h $ runPut $ B.put pVersion
+    timeout 60 (msgRead h) >>= \case
+      Nothing -> logIO "Timeout error" >> throwIO (ExitFailure errorNetwork)
+      Just "matched" -> return ()
+      Just{} -> do
+        logIO "This agent is outdated, download a new version from the official website"
+        throwIO (ExitFailure errorObsolete)
+
+  puzzle :: Handle -> IO ()
   puzzle h = do
     test <- BL.toStrict <$> msgRead h
     answer <- BL.fromStrict <$> solvePuzzle test
     msgWrite h answer
-    msgRead h >>= \case
-      "solved" -> return ()
-      _ -> do
-        ?log "Handshake error"
-        exitWith (ExitFailure errorPuzzle)
-  connAcquire :: (?log :: LogStr -> IO ()) => IO Handle
-  connAcquire = do
-    ?log "Connecting to server..."
-    fh .@. fp >>= (`socketToHandle` ReadWriteMode)
+    timeout 60 (msgRead h) >>= \case
+      Nothing -> logIO "Timeout error" >> throwIO (ExitFailure errorNetwork)
+      Just "solved" -> return ()
+      Just{} -> do
+        logIO "Handshake error"
+        throwIO (ExitFailure errorPuzzle)
 
-  ctxAcquire :: (?log :: LogStr -> IO ()) => Handle -> IO Context
-  ctxAcquire h = do
-    ?log "Performing handshake..."
+  connAcquire :: IO Handle
+  connAcquire = go 3
+    where
+    go :: Int -> IO Handle
+    go 0 = throwIO (ExitFailure errorNetwork)
+    go n = do
+      logIO "Connecting to server..."
+      catch (fh .@. fp) (\(e :: SomeException) -> logIO (showT e) >> wait 1 >> go (n - 1))
+
+  ctxAcquire :: Handle -> ClientParams -> IO Context
+  ctxAcquire h cli = do
+    logIO "Performing handshake..."
     ctx <- contextNew h cli
     handshake ctx
     return ctx
 
--- TODO: add tests for this function
-addNew :: (LogStr -> IO ()) -> Debug -> Quiver -> MVar Arrow -> B.ByteString -> Arrow -> Int -> IO Int
-addNew log debug quiver back fh (Arrow ah sh) top
+addNew :: Logger -> Bool -> Quiver -> MVar Arrow -> BC.ByteString -> Arrow -> Int -> IO Int
+addNew logIO debug quiver back fh (Arrow ah sh) top
   | top >= ah = do
-    debugLog "race condition caught"
-    putArrow back ah def { responseReply = SocksRefused, responseAddr = fh, responsePort = 0 }
+    putArrow back ah def { responseReply = SocksRefused, responseAddr = fh }
     return top
-  | B.null sh = return ah
+  | BC.null sh = return ah
   | otherwise = do
-    -- call fork later or two `addNew` can be called with the same arrowhead
-    -- we're ignoring port here, fix it if pycurl will row
     mvar <- atomically newEmptyTMVar
     atomically $ modifyTVar quiver (IM.insert ah mvar)
     tStart <- getTime
-    void $ forkFinally (go tStart mvar $ runGetIncremental get `pushChunk` sh)
-                       (either (log . toLogStr . show)
+    void $ forkFinally (go tStart mvar $ runGetIncremental B.get `pushChunk` sh)
+                       (either (logIO . showT)
                                (const (atomically $ modifyTVar quiver (IM.delete ah))))
     return ah
   where
   getTime = if debug then systemToTAITime <$> getSystemTime else return taiEpoch
-  debugLog x = when debug $ log (toLogStr (show ah) <> ": " <> x)
-  formatLog t1 t2 = toLogStr (printf ", %.6f Connect()/%.6f HTTP" t1 t2 :: String)
-  diffT t1 t2 = fromIntegral (diffTimeToPicoseconds $ diffAbsoluteTime t2 t1) * 1e-12 :: Double
-  go _ _ (Fail s _ e) = do
-    putArrow back ah def { responseReply = SocksRefused, responseAddr = fh, responsePort = 0 }
-    log (toLogStr (show ah) <> ": unexpected error, please report to developers: " <> toLogStr e)
-    log (toLogStr (show ah) <> ": " <> toLogStr (B.take 30 s))
-  go t mvar (Partial k) =
-    atomically (takeTMVar mvar) >>= go t mvar . k . Just
+  debugLog x = when debug $ logIO (showT ah <> ": " <> x)
+  formatLog t1 t2 = T.pack (printf ", %.6f Connect()/%.6f HTTP" t1 t2 :: String)
+
+  diffT :: AbsoluteTime -> AbsoluteTime -> Double
+  diffT t1 t2 = fromIntegral (diffTimeToPicoseconds $ diffAbsoluteTime t2 t1) * 1e-12
+
+  go t mvar (Partial k) = atomically (takeTMVar mvar) >>= go t mvar . k . Just
   go tStart mvar (Done left _ (SocksRequest _ _ addr port)) =
-    try (addr .@. port >>= flip socketToHandle ReadWriteMode) >>= \case
+    try (addr .@. port) >>= \case
+      -- TODO: parse exception
       Left (e :: ProtocolException) -> do
         tCon <- getTime
-        debugLog (toLogStr (show e) <> formatLog (diffT tCon tStart) (0 :: Int))
-        putArrow back ah def { responseReply = SocksRefused, responseAddr = fh, responsePort = 0 }
-      Right p -> do
+        debugLog (showT e <> formatLog (diffT tCon tStart) (0 :: Int))
+        putArrow back ah def { responseReply = SocksRefused, responseAddr = fh }
+      Right h -> do
         tCon <- getTime
-        unless (B.null left) (atomically (putTMVar mvar left))
-        putArrow back ah def { responseAddr = fh, responsePort = 0 }
-        arrowsPair p ah back mvar
-        dispose p
+        unless (BC.null left) (atomically (putTMVar mvar left))
+        putArrow back ah def { responseAddr = fh }
+        arrowsPair h ah back mvar
+        dispose h
         tFin <- getTime
         debugLog ("Request performed" <> formatLog (diffT tStart tCon) (diffT tCon tFin))
+  go _ _ (Fail s _ e) = do
+    putArrow back ah def { responseReply = SocksRefused, responseAddr = fh }
+    logIO (showT ah <> ": unexpected error, please report to the developers: " <> T.pack e)
+    logIO (showT ah <> ": " <> showT (BC.take 30 s))
+
+--------------------------------------- Main ---------------------------------------------
 
 main :: IO ()
-main = hSetBuffering stdout LineBuffering >> execParser parserInfo >>= \case
-  ShowBuildInfo -> putDoc $ vsep [ text ("Version: " <> version)
-                                , text ("Protocol version: " <> showVersion pVersion)
-                                , text ("Build date: " <> buildDate) ]
-  Run target@(fh :@: _) api mToken mPath ignore once debug -> do
-    (tlog, clean) <- newTimeCache "%b %d %X - " >>= flip newTimedFastLogger (LogStdout defaultBufSize)
-    let ?log = \x -> tlog (\t -> toLogStr t <> x <> "\n") in handleExit clean $ do
-      ?log "Start agent"
-      token <- case mToken of
-        Just token -> return token
-        Nothing    -> getToken tlog mPath api ignore
-      let cli = client (BC.unpack fh) ignore
-      run target token cli once debug
-  where
-  handleExit :: (?log :: LogStr -> IO ()) => IO () -> IO () -> IO ()
-  handleExit clean = handle $ \(e :: ExitCode) -> do
-    ?log "Exit in 5 seconds"
-    ?log (toLogStr (show e))
-    clean
-    wait 5
-    exitWith e
+main = do
+  config <- getAppUserDataDirectory "bbs" >>= execParser . parserInfo
+  input <- newInput
+  output <- newOutput
+  self <- myThreadId
+  i_tid <- forkFinally (frontend config input output)
+                       (either (void . tryIO . throwTo self) pure)
+  res <- catches (evalStateT (runReaderT interact (input, output)) config)
+                 (handlers $ logO output)
+  throwTo i_tid res
+  unless (res == ExitFailure errorInterrupt) $ wait 4
+  wait 1
+
+handlers :: Logger -> [Handler ExitCode]
+handlers logIO = [
+   Handler (\(e :: ExitCode) -> pure e)
+ , Handler (\(e :: AsyncException) -> logIO (showT e) $> ExitFailure errorInterrupt)
+ , Handler (\(e :: TLSException) -> logIO (showT e) $> ExitFailure errorTLS)
+ , Handler (\(e :: SomeException) -> logIO (showT e)  $> ExitFailure errorUnknown)
+ ]
+
+interact :: (MonadIO m, MonadState Config m, MonadReader Interactive m) => m a
+interact = readInput >>= \case
+  Exit code -> liftIO $ throwIO code
+  ConfigChange config -> put config >> interact
+  SaveTokens tokens -> saveTokens tokens >> interact
+  RunApi -> runApi >> interact
+  RunToken -> runToken >> interact
+  RunProxy -> runProxy >> interact

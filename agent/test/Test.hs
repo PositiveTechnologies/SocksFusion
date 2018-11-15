@@ -1,72 +1,121 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
-import           Mocks
-import           Agent
+import           Test.Mocks
+import           Test.Templates
+import           Test.SaaS.Instances
+import           Agent.Types
+import           Agent.Console
+import           Network.SocksFusion (timeout, wait)
 
 import           Test.Hspec
 import           Test.HUnit
 import           Test.QuickCheck hiding (Success)
 
-import           Network.Socket
 import           System.Exit            (ExitCode(..))
 import           System.Directory
 import           System.IO
+import           System.Log.FastLogger
 import           Control.Exception
+import           Data.Time.Clock
+import           Data.Time.Calendar
+
 import           Control.Monad
+import           Control.Monad.Reader
+import           Control.Monad.State.Lazy
 import           Data.Monoid
 
 import           Data.Aeson
 import           Data.ByteString.Lazy   (ByteString)
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.HashMap.Strict as HM
+import qualified Data.ByteString.Char8 as BC
 
 import           Text.Read              (read)
+import           Text.PrettyPrint.ANSI.Leijen (text)
 import           Language.Haskell.TH    (mkName)
 import           Data.Functor.Identity
 
---------------------------------------- Types -----------------------------------------------------
+import           Control.Concurrent.STM
+import           Control.Concurrent
+
+--------------------------------------- Types ------------------------------------------
 
 shouldLike :: (HasCallStack, Exception e) => IO (Either e a) -> Selector e -> Expectation
 shouldLike action p = action >>= \case
    Right{} -> expectationFailure "did not get expected exception"
    Left e  -> p e `unless` expectationFailure ("predicate failed on expected exception " <> show e)
 
---------------------------------------- Main ------------------------------------------------------
+instance Arbitrary UTCTime where
+  arbitrary = UTCTime <$> (ModifiedJulianDay . (2000 +) <$> arbitrary)
+                      <*> (fromRational . toRational <$> choose (0 :: Double, 86400))
+
+$(genericArbitrary ''Token)
+
+deriving instance Show Token
+
+--------------------------------------- Main -------------------------------------------
 
 main :: IO ()
-main = hspec $ do
-  describe "loadM" $ loadMTest
-  describe "IO" $ it "IO" pending
+main = do
+  ch <- atomically newTQueue
+  let ?tlog = \f -> atomically $ writeTQueue ch $ f ""
+  hspec $ do
+    describe "JSON" $
+      it "Token" $ property $ \(t :: Token) -> eitherDecode (encode t) === Right t
+    describe "Dialog" (dialogs ch)
 
-loadMTest :: Spec
-loadMTest = do
-  it "zero"    $ loadM pure ([] :: [Maybe Int])                         == Identity Nothing
-  it "nothing" $ loadM pure ([Nothing, Nothing] :: [Maybe Int])         == Identity Nothing
-  it "one"     $ loadM pure [Nothing, Just 1, Nothing]                 == Identity (Just 1)
-  it "many"    $ loadM pure [Nothing, Just 1, Just 2, Just 3, Nothing] == Identity (Just 1)
+--------------------------------------- IO ---------------------------------------------
 
---------------------------------------- IO --------------------------------------------------------
-
-{-
-testReadWrite :: Spec
-testReadWrite = around (\run -> do
-  (path, handle) <- openBinaryTempFile "/tmp" "saas.test"
-  prepare "normal"
-  hSetBuffering handle NoBuffering
-  res <- tryAny $ run handle
-  hClose handle
-  removeFile path
-  either throwIO return res) $ do
-    it "empty" $ \h -> shouldReturn (act h "") ""
-    it "string" $ \h -> property $ \bs -> shouldReturn (act h $ BL.pack bs) (BL.pack bs)
-  where
-  act h s = msgWrite h s >> hSeek h AbsoluteSeek 0 >> msgRead h
--}
+dialogs :: (?tlog :: TimedFastLogger) => TQueue LogStr -> Spec
+dialogs ch = around (\run -> do
+  input <- newInput
+  output <- newOutput
+  run (\r -> evalStateT (runReaderT r (output, input)) undefined)) $ do
+    it "Timeout 1" $ \run -> do
+      timeout 2 $ run $ dialog [ ("", logPretty $ text "correct")
+                               , ("1", return ()) ]
+                               (text "Test timeout: ") (Just 1)
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test timeout: \n", "> ", "\n", "correct\n"]
+    it "Timeout 2" $ \run -> do
+      timeout 2 $ run $ dialog [ ("", logPretty $ text "correct")
+                               , ("1", return ()) ]
+                               (text "Test timeout: ") (Just 5)
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test timeout: \n", "> "]
+    it "Select unknown" $ \run -> do
+      forkIO $ wait 1 >> withFile "/proc/self/fd/0" AppendMode (`hPutStr` "2\n")
+      timeout 3 $ run $ dialog [ ("", logPretty $ text "empty")
+                               , ("1", logPretty $ text "one") ]
+                               (text "Test select: ") Nothing
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test select: \n", "> ", "\n", "Please enter one: 1\n", "> "]
+    it "Select one" $ \run -> do
+      forkIO $ wait 1 >> withFile "/proc/self/fd/0" AppendMode (`hPutStr` "1\n")
+      timeout 3 $ run $ dialog [ ("", logPretty $ text "empty")
+                               , ("1", logPretty $ text "one") ]
+                               (text "Test select: ") Nothing
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test select: \n", "> ", "\n", "one\n"]
+    it "Select case" $ \run -> do
+      forkIO $ wait 1 >> withFile "/proc/self/fd/0" AppendMode (`hPutStr` "ONE\n")
+      timeout 3 $ run $ dialog [ ("", logPretty $ text "empty")
+                               , ("one", logPretty $ text "one") ]
+                               (text "Test select: ") Nothing
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test select: \n", "> ", "\n", "one\n"]
+    it "Select letter" $ \run -> do
+      forkIO $ wait 1 >> withFile "/proc/self/fd/0" AppendMode (`hPutStr` "o\n")
+      timeout 3 $ run $ dialog [ ("", logPretty $ text "empty")
+                               , ("one", logPretty $ text "one") ]
+                               (text "Test select: ") Nothing
+      res <- atomically (flushTQueue ch)
+      res `shouldBe` ["\n", "Test select: \n", "> ", "\n", "one\n"]

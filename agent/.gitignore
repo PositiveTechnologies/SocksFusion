@@ -11,20 +11,18 @@ build
 
 # other
 *.fifo
-./version
 *.log
 *.out
 *.bkp
 .ropeproject
+*.orig
+*.dot
+tags
+*.tix
+.mypy_cache
 
 # test files
 local
-local_full
+local2
 remote
-remote_full
-
-# mocks
-tests/mocks/*
-!tests/mocks/config.xml
-!tests/mocks/we_server.py
-!tests/mocks/we_client.py
+*.token

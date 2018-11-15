@@ -10,6 +10,7 @@ module Network.SocksFusion (
    -- * Utils
    pVersion
  , wait
+ , timeout
  , BinaryException(..)
    -- * Network
  , AddrPort(..)
@@ -26,8 +27,8 @@ module Network.SocksFusion (
  , Arrow(..)
  , arrowsPair
  , cOMMAND
- , hEARTBEATIN
- , hEARTBEATOUT
+ , hEARTBEAT
+ , iNFO
    -- * Challenge
  , createPuzzle
  , solvePuzzle
@@ -37,12 +38,13 @@ module Network.SocksFusion (
  ) where
 
 import           Prelude         hiding (all, log)
+import qualified Paths_SocksFusion
 
 import           Control.Concurrent
 import           Control.Concurrent.STM
 import           Control.Monad
 import           Control.Monad.Reader
-import           Control.Exception      (IOException, Exception, SomeException, try, handle, throwIO, throw)
+import           Control.Exception      (IOException, Exception, SomeException, try, catch, handle, throwIO)
 
 import           Data.Char
 import           Data.Bits
@@ -68,20 +70,20 @@ import           Crypto.Hash
 import qualified System.Timeout
 import           System.IO
 
---------------------------------------- Constants -------------------------------------------------
+--------------------------------------- Constants ----------------------------------------
 
 -- | Protocol version.
 pVersion :: Version
-pVersion = Version [1, 3] mempty
+pVersion = Paths_SocksFusion.version
 
 cOMMAND :: Int
 cOMMAND = 0
-hEARTBEATIN :: Int
-hEARTBEATIN = 1
-hEARTBEATOUT :: Int
-hEARTBEATOUT = 2
+hEARTBEAT :: Int
+hEARTBEAT = 1
+iNFO :: Int
+iNFO = 2
 
---------------------------------------- Utils -----------------------------------------------------
+--------------------------------------- Utils --------------------------------------------
 
 -- | Sleep for @n@ seconds.
 wait :: Int -> IO ()
@@ -93,11 +95,11 @@ timeout x = System.Timeout.timeout (x * 1000000)
 try_ :: IO () -> IO ()
 try_ a = void (try a :: IO (Either SomeException ()))
 
---------------------------------------- Network ---------------------------------------------------
+--------------------------------------- Network ------------------------------------------
 
 type Host = ByteString
 
-data AddrPort = !Host :@: !PortNumber
+data AddrPort = !Host :@: !PortNumber             deriving Eq
 instance Show AddrPort where
   show (host :@: port)
     | B.null host      = p
@@ -119,16 +121,18 @@ instance Read AddrPort where
 
 --------------------------------------- Peers
 
-newtype ProtocolException = Silence [SockAddr]
+data ProtocolException = Refused [SockAddr] | Timeout [SockAddr] | Unknown Host
 instance Show ProtocolException where
-  show (Silence xs) = foldl (\a b -> a <> " " <> show b) "Target is unreachable:" xs
+  show (Refused xs) = foldl (\a b -> a <> " " <> show b) "Connection refused:" xs
+  show (Timeout xs) = "Target is unreachable: " <> unwords (map show xs)
+  show (Unknown h)  = "Cannot resolve address: " <> BC.unpack h
 instance Exception ProtocolException
 
 -- | Open socket server on given address.
 (@<) :: AddrPort -> IO Socket
 (@<) (a :@: p) = do
   (fam, addr) <- (addrFamily &&& addrAddress) . preferIpv4
-            <$> getAddrInfo (Just $ defaultHints { addrFlags = [ AI_PASSIVE, AI_NUMERICHOST ]
+            <$> getAddrInfo (Just $ defaultHints { addrFlags = [AI_PASSIVE, AI_NUMERICHOST]
                                                  , addrSocketType = Stream })
                             (if B.null a then Nothing else Just $ BC.unpack a)
                             (Just $ show p)
@@ -148,23 +152,22 @@ instance Exception ProtocolException
   return c
 
 -- | Try to connect to giver host and port.
-(.@.) :: Host -> PortNumber -> IO Socket
+(.@.) :: Host -> PortNumber -> IO Handle
 h .@. p = do
   addrs <- getAddrInfo (Just $ defaultHints { addrSocketType = Stream })
-                      (Just $ BC.unpack h)
-                      (Just $ show p)
+                       (Just $ BC.unpack h)
+                       (Just $ show p) `catch` (\(_ :: IOError) -> throwIO $ Unknown h)
   -- Connect to all addresses and throw an error if nothing is success.
   foldl (\x -> handle (\(_ :: IOException) -> x) . c)
-        (throwIO . Silence $ map addrAddress addrs)
+        (throwIO . Refused $ map addrAddress addrs)
         addrs
   where
   c a = do
     s <- socket (addrFamily a) Stream 0x6
     setSocketOption s KeepAlive 1
     timeout 3 (s `connect` addrAddress a) >>= \case
-      Nothing -> dispose s >> throw (Silence [addrAddress a])
-      Just _  -> return s
-infixl 2 .@.
+      Nothing -> dispose s >> throwIO (Timeout [addrAddress a])
+      Just{}  -> socketToHandle s ReadWriteMode
 
 class Disposable a where
   dispose :: a -> IO ()
@@ -175,63 +178,67 @@ instance Disposable Handle where
 instance Disposable T.Context where
   dispose ctx = try_ $ T.bye ctx
 
---------------------------------------- Arrows ----------------------------------------------------
+--------------------------------------- Arrows -------------------------------------------
 
-data Arrow = Arrow { arrowhead :: {-# UNPACK #-} !Int          -- ^ Identifier for multiplexor.
+data Arrow = Arrow { arrowhead :: {-# UNPACK #-} !Int          -- ^ Message identifier.
                    , shaft     :: {-# UNPACK #-} !ByteString   -- ^ Actual message.
-                   } deriving (Eq, Show)
+                   }                              deriving (Eq, Show)
 
 instance Binary Arrow where
-  get = Arrow <$> fmap fromIntegral getWord32le <*> (getWord32le >>= getByteString . fromIntegral)
-  put (Arrow ah sh) = putWord32le (fromIntegral ah)
-                   >> putWord32le (fromIntegral $ B.length sh)
-                   >> putByteString sh
+  get = Arrow <$> (fromIntegral <$> getWord32le)
+              <*> (getWord16le >>= getByteString . fromIntegral)
+  put (Arrow ah sh) = do
+    putWord32le (fromIntegral ah)
+    let len = toEnum $ B.length sh
+    putWord16le len
+    -- Double conversion to trunk the size of message
+    putByteString (B.take (fromEnum len) sh)
 
 newtype BinaryException = ErrorBinary String
 instance Show BinaryException where
   show (ErrorBinary s) = s
 instance Exception BinaryException
 
---------------------------------------- Quivers ---------------------------------------------------
+--------------------------------------- Quivers ------------------------------------------
 
 type Quiver = TVar (IM.IntMap (TMVar ByteString))
 defaultQuiver :: STM Quiver
 defaultQuiver = do
-  cmd <- newEmptyTMVar
-  h1 <- newEmptyTMVar
-  h2 <- newTMVar "Waiting"
-  newTVar $ IM.fromList [(cOMMAND, cmd), (hEARTBEATIN, h1), (hEARTBEATOUT, h2)]
+  command   <- newEmptyTMVar
+  heartbeat <- newEmptyTMVar
+  progress  <- newEmptyTMVar
+  newTVar $ IM.fromList [(cOMMAND, command), (hEARTBEAT, heartbeat), (iNFO, progress)]
 
 -- | Blocking function returns mvar by it's arrowhead.
 getTMVar :: Int -> Quiver -> STM (TMVar ByteString)
 getTMVar index quiver = IM.lookup index <$> readTVar quiver >>= maybe retry return
 
---------------------------------------- Multiplexing ----------------------------------------------
+--------------------------------------- Multiplexing -------------------------------------
 
 finThread :: MVar () -> a -> IO ()
 finThread control = const $ void $ tryPutMVar control ()
 
--- | Run secured proxy <-> agent tunnel.
+-- | Run secured proxy<->agent tunnel.
 contextRun :: Quiver
-           -> MVar Arrow               -- ^ Second argument for outcoming messages,
+           -> MVar Arrow
            -> T.Context
-           -> (Arrow -> Int -> IO Int)   -- ^ Action for unknown arroheads. Return's max global ah.
-           -> (ByteString -> IO ())     -- ^ Logger action.
+           -> (Arrow -> Int -> IO Int) -- ^ Action for new heads. Returns max global head.
+           -> (ByteString -> IO ())    -- ^ Logger action.
            -> IO ()
 contextRun quiver back ctx notFound log = do
   control <- newEmptyMVar
-  (hin, hout) <- atomically $ pure (,) <*> getTMVar hEARTBEATIN quiver
-                                      <*> getTMVar hEARTBEATOUT quiver
+  (heartbeat, progress) <- atomically $ (,) <$> getTMVar hEARTBEAT quiver
+                                            <*> getTMVar iNFO quiver
   let forkControl = flip forkFinally (finThread control)
-  s_tid  <- forkControl  sendC
-  r_tid  <- forkControl (recvC decoder 0)
-  hr_tid <- forkControl (recvH hin mempty)
-  hs_tid <- forkControl (sendH hout mempty)
+  h_tid <- forkControl (sendH heartbeat)
+  s_tid <- forkControl  sendC
+  r_tid <- forkControl (recvC decoder 0)
+  p_tid <- forkControl (recvP progress)
   void $ takeMVar control
-  killThread s_tid >> killThread r_tid >> killThread hr_tid >> killThread hs_tid
+  killThread s_tid >> killThread r_tid >> killThread h_tid >> killThread p_tid
   where
   decoder = runGetIncremental get
-  delay = 60
+  delay = 30
   sendC = do
     arr@(Arrow ah sh) <- takeMVar back
     T.sendData ctx $ runPut $ put arr
@@ -249,14 +256,13 @@ contextRun quiver back ctx notFound log = do
   recvC (Partial k) top = do
     m <- T.recvData ctx
     unless (B.null m) (recvC (k $ Just m) top)
-  sendH mvar prev = do
-    msg <- atomically $ fromMaybe prev <$> tryTakeTMVar mvar
-    putMVar back (Arrow hEARTBEATIN msg) -- IN because of symmetric protocol
-    wait delay
-    sendH mvar msg
-  recvH mvar prev = timeout (2 * delay) (atomically $ takeTMVar mvar) >>= \case
-    Nothing   -> return ()
-    Just smth -> when (prev /= smth) (log smth) >> recvH mvar smth
+  sendH mvar = timeout (2 * delay) (atomically $ takeTMVar mvar) >>= \case
+    Nothing  -> return ()
+    Just msg -> do
+      putMVar back (Arrow hEARTBEAT msg)
+      wait delay
+      sendH mvar
+  recvP mvar = atomically (takeTMVar mvar) >>= log >> recvP mvar
 
 -- | Sockets pair used for external connection.
 arrowsPair :: Handle -> Int -> MVar Arrow -> TMVar ByteString -> IO ()
@@ -268,7 +274,8 @@ arrowsPair h ah back message = do
   killThread s_tid >> killThread r_tid
   void $ tryPutMVar back (Arrow ah B.empty)
   where
-  chunk = 4 * 1024
+  chunk :: Int
+  chunk = 65535
   sendC = do
     m <- atomically $ takeTMVar message
     unless (B.null m) $ do
@@ -280,10 +287,11 @@ arrowsPair h ah back message = do
     putMVar back (Arrow ah m)
     recvC
 
---------------------------------------- Challenge -------------------------------------------------
+--------------------------------------- Challenge ----------------------------------------
 
 -- | Bitwise test for bytestrings for global complexity.
-bitEq :: (B.ByteArrayAccess b1, B.ByteArrayAccess b2, MonadReader (a, Int) m) => b1 -> b2 -> m Bool
+bitEq :: (B.ByteArrayAccess b1, B.ByteArrayAccess b2, MonadReader (a, Int) m)
+      => b1 -> b2 -> m Bool
 bitEq b1 b2 = do
   (units, modulo) <- asks (flip divMod 8 . snd)
   return $ B.takeView b1 units `B.eq` B.takeView b2 units
