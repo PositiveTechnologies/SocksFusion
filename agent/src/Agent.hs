@@ -390,7 +390,8 @@ addNew logIO debug quiver back fh (Arrow ah sh) top
   where
   getTime = if debug then systemToTAITime <$> getSystemTime else return taiEpoch
   debugLog x = when debug $ logIO (showT ah <> ": " <> x)
-  formatLog t1 t2 = T.pack (printf ", %.6f Connect()/%.6f HTTP" t1 t2 :: String)
+  formatLog :: Double -> Double -> Text
+  formatLog t1 = T.pack . printf ", %.6f Connect()/%.6f HTTP" t1
 
   diffT :: AbsoluteTime -> AbsoluteTime -> Double
   diffT t1 t2 = fromIntegral (diffTimeToPicoseconds $ diffAbsoluteTime t2 t1) * 1e-12
@@ -401,7 +402,7 @@ addNew logIO debug quiver back fh (Arrow ah sh) top
       -- TODO: parse exception
       Left (e :: ProtocolException) -> do
         tCon <- getTime
-        debugLog (showT e <> formatLog (diffT tCon tStart) (0 :: Int))
+        debugLog (showT e <> formatLog (diffT tStart tCon) 0)
         putArrow back ah def { responseReply = SocksRefused, responseAddr = fh }
       Right h -> do
         tCon <- getTime
