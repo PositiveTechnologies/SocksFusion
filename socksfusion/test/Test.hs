@@ -1,26 +1,27 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Main where
 
 import           Prelude         hiding ((.))
 import           Network.SocksFusion
 import           Network.Socks5
+import           Test.Templates
+import           Test.SaaS.Instances    ()
 
 import           Test.Hspec
-import           Test.HUnit
+import           Test.Hspec.QuickCheck
 import           Test.QuickCheck hiding (Success)
 
-import           Network.Socket         (PortNumber)
-import           Control.Exception      (evaluate)
-
+import           Data.List              (intercalate)
 import           Control.Category
 import           Control.Monad.Reader
-import           Data.Function          ((&))
-import           Data.ByteString.Lazy   (ByteString)
-import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString      as BS
+import qualified Data.ByteString.Char8 as BC
 import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.Put
@@ -34,11 +35,46 @@ encodeDecode = runGet get . runPut . put
 simpleTest :: (Show a, Binary a, Eq a) => a -> Spec
 simpleTest a = it (show a) $ encodeDecode a == a
 
-instance Arbitrary BS.ByteString where
-  arbitrary = BS.pack <$> arbitrary
+instance Arbitrary Arrow where
+  arbitrary = do
+    NonNegative ah <- arbitrary
+    Arrow ah <$> arbitrary
 
-instance Arbitrary PortNumber where
-  arbitrary = fromIntegral <$> (arbitrary :: Gen Word16)
+instance Arbitrary SocksRequest where
+  arbitrary = do
+    atype <- arbitrary
+    addr <- case atype of
+      SocksIPv4 -> do
+        nums <- replicateM 4 arbitraryASCIIChar
+        return $ BC.pack $ intercalate "." $ map (show . fromEnum) nums
+      SocksDomain -> arbitrary
+      _ -> fail "Unknown atyp"
+    SocksRequest <$> arbitrary <*> pure atype <*> pure addr <*> arbitrary
+
+instance Arbitrary SocksResponse where
+  arbitrary = do
+    atype <- arbitrary
+    addr <- case atype of
+      SocksIPv4 -> do
+        nums <- replicateM 4 arbitraryASCIIChar
+        return $ BC.pack $ intercalate "." $ map (show . fromEnum) nums
+      SocksDomain -> arbitrary
+      _ -> fail "Unknown atyp"
+    SocksResponse <$> arbitrary <*> pure atype <*> pure addr <*> arbitrary
+
+instance Arbitrary SocksAtyp where
+  arbitrary = oneof [pure SocksIPv4, pure SocksDomain]
+
+$(genericArbitrary ''AgentMessage)
+$(genericArbitrary ''ProxyMessage)
+$(genericArbitrary ''Siid)
+$(genericArbitrary ''KeyResponse)
+$(genericArbitrary ''ScanChange)
+$(genericArbitrary ''ExtSocksSyn)
+$(genericArbitrary ''SocksAck)
+$(genericArbitrary ''SocksMethod)
+$(genericArbitrary ''SocksCommand)
+$(genericArbitrary ''SocksReply)
 
 --------------------------------------- Main ---------------------------------------------
 
@@ -46,20 +82,28 @@ main :: IO ()
 main = hspec $ do
   describe "Read" $ describe "AddrPort" addrPort
   describe "Binary" $ do
-    describe "Arrow"         arrows
-    describe "ExtSocksSyn"   socksSyn
-    describe "SocksAck"      socksAck
-    describe "SocksRequest"  socksRequest
-    describe "SocksResponse" socksResponse
-    describe "SocksMethod"   socksMethod
-    describe "SocksCommand"  socksCommand
-    describe "SocksAtyp"     socksAtyp
-    describe "SocksReply"    socksReply
+    prop "Arrow" (encodeTest :: Arrow -> Property)
+    prop "ExtSocksSyn" (encodeTest :: ExtSocksSyn -> Property)
+    prop "SocksAck" (encodeTest :: SocksAck -> Property)
+    prop "SocksRequest" (encodeTest :: SocksRequest -> Property)
+    prop "SocksResponse" (encodeTest :: SocksResponse -> Property)
+    prop "SocksMethod" (encodeTest :: SocksMethod-> Property)
+    prop "SocksCommand" (encodeTest :: SocksCommand -> Property)
+    prop "SocksAtyp" (encodeTest :: SocksAtyp -> Property)
+    prop "SocksReply" (encodeTest :: SocksReply -> Property)
+    prop "AgentMessage" (encodeTest :: AgentMessage -> Property)
+    prop "ProxyMessage" (encodeTest :: ProxyMessage -> Property)
+    prop "KeyResponse" (encodeTest :: KeyResponse -> Property)
+    prop "ScanChange" (encodeTest :: ScanChange -> Property)
+    prop "Siid" (encodeTest :: Siid -> Property)
   describe "Puzzle" $ do
     describe "bitEq" bitEqTest
-    it "incr" $ property $ \(NonNegative x) -> succ (toEnum x) == incr (toEnum x :: [Word8])
-    it "solvePuzzle" $ property testSolve
+    prop "incr" $ \(NonNegative x) -> succ (toEnum x) == incr (toEnum x :: [Word8])
+    prop "solvePuzzle" testSolve
     describe "testPuzzle" testPuzzleTest
+  where
+  encodeTest :: (Binary a, Eq a, Show a) => a -> Property
+  encodeTest t = runGet get (runPut $ put t) === t
 
 --------------------------------------- Read ---------------------------------------------
 
@@ -70,69 +114,6 @@ addrPort = mapM_ (\t -> it t $ readTest t) [ "[0a:ab:ce:ef:01:12]:1111"
   where
   readTest :: String -> Bool
   readTest str = show (read str :: AddrPort) == str
-
---------------------------------------- Binary -------------------------------------------
-
-arrows :: Spec
-arrows = it "Arrow" $ property $ \ah sh -> let x = Arrow (getNonNegative ah) sh in encodeDecode x == x
-
-socksSyn :: Spec
-socksSyn = do
-  it "Info" $ property $ \str -> let x = SocksInfo str in encodeDecode x == x
-  it "Methods 0" $ let x = SocksSyn mempty in encodeDecode x == x
-  it "Methods 1" $ let x = SocksSyn [SocksNoAuth] in encodeDecode x == x
-  it "Methods 3" $ let x = SocksSyn [SocksNoAuth, SocksMethodOther, SocksMethodOther] in encodeDecode x == x
-
-socksAck :: Spec
-socksAck = it "Ack" $ let x = SocksAck SocksNoAuth in encodeDecode x == x
-
-socksRequest :: Spec
-socksRequest = do
-  it "Request ipv4" $ property $ \port ->
-    let x = SocksRequest SocksConnect SocksIPv4 "127.0.0.1" port in
-      encodeDecode x == x
-  it "Request ipv6" $ property $ \port ->
-    let x = SocksRequest SocksBind SocksIPv6 "a1:23:45:67:89:10" port in
-      evaluate (encodeDecode x) `shouldThrow` errorCall "ipv6 is not implemented"
-  it "Request domain" $ property $ \host port ->
-    let x = SocksRequest SocksAssociate SocksDomain host port in
-      encodeDecode x == x
-
-socksResponse :: Spec
-socksResponse = do
-  it "Response ipv4" $ property $ \port ->
-    let x = SocksResponse SocksSucceeded SocksIPv4 "127.0.0.1" port in
-      encodeDecode x == x
-  it "Response ipv6" $ property $ \port ->
-    let x = SocksResponse SocksUnreachable SocksIPv6 "a1:23:45:67:89:10" port in
-      evaluate (encodeDecode x) `shouldThrow` errorCall "ipv6 is not implemented"
-  it "Response domain" $ property $ \host port ->
-    let x = SocksResponse SocksRefused SocksDomain host port
-      in encodeDecode x == x
-
-socksMethod :: Spec
-socksMethod = do
-  simpleTest SocksNoAuth
-  simpleTest SocksMethodOther
-
-socksCommand :: Spec
-socksCommand = do
-  simpleTest SocksConnect
-  simpleTest SocksBind
-  simpleTest SocksAssociate
-
-socksAtyp :: Spec
-socksAtyp = do
-  simpleTest SocksIPv4
-  simpleTest SocksIPv6
-  simpleTest SocksDomain
-
-socksReply :: Spec
-socksReply = do
- simpleTest SocksSucceeded
- simpleTest SocksUnreachable
- simpleTest SocksRefused
- simpleTest SocksReplyOther
 
 --------------------------------------- Puzzle -------------------------------------------
 

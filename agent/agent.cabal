@@ -1,5 +1,5 @@
 name:                  agent
-version:               1.5.4
+version:               1.6.2
 stability:             stable on all operating systems
 synopsis:              BBS saas agent
 license:               GPL-3
@@ -7,7 +7,7 @@ license-file:          LICENSE
 category:              System, Network
 maintainer:            Stepanov Boris (bstepanov@ptsecurity.com)
 build-type:            Simple
-tested-with:           GHC == 8.2.2
+tested-with:           GHC == 8.6.3
 cabal-version:         >= 1.24
 bug-reports:           https://github.com/PositiveTechnologies/SocksFusion/issues
 
@@ -16,100 +16,95 @@ source-repository head
   location:            git://github.com/PositiveTechnologies/SocksFusion
   subdir:              agent
 
-flag threaded
-  description:         use threaded runtime
-  default:             True
+library
+  exposed-modules:     Agent.Types
+                     , Agent.UI
+                     , Agent.UI.Core
+                     , Agent.Backend
+                     , Agent.Frontend
+                     , Agent.Frontend.Console
+                     , Agent.Frontend.Console.Internal
+  other-modules:       Paths_agent
+  autogen-modules:     Paths_agent
+  hs-source-dirs:      src
+  build-depends:       SocksFusion      >= 1.5
+                     , aeson            >= 1.2
+                     , ansi-terminal    >= 0.8.2
+                     , ansi-wl-pprint   >= 0.6
+                     , base             >= 4.10 && < 5
+                     , binary           >= 0.8.5
+                     , bytestring       >= 0.10.8
+                     , connection       >= 0.2
+                     , containers       >= 0.5.10
+                     , data-default-class >= 0.1.2
+                     , directory        >= 1.3
+                     , filepath         >= 1.4
+                     , file-embed       >= 0.0.10
+                     , free             >= 5.0
+                     , http-client      >= 0.5.13
+                     , http-client-tls  >= 0.3.5
+                     , http-types       >= 0.12
+                     , microlens-platform >= 0.3.9
+                     , mtl              >= 2.2
+                     , process          >= 1.6
+                     , stm              >= 2.4
+                     , template-haskell >= 2.12
+                     , text             >= 1.2
+                     , terminal-size    >= 0.1
+                     , time             >= 1.8
+                     , tls              >= 1.4
+                     , x509-store       >= 1.6
+                     , x509-validation  >= 1.6
+--                     , honk             -any
+  build-tools:         hsc2hs
+  if os(windows)
+    hs-source-dirs:    windows
+    build-depends:     Win32            >= 2.5
+  if os(linux)
+    hs-source-dirs:    linux
+    build-depends:     unix             >= 2.7
+    include-dirs:      include
+    includes:          termops.h
+    install-includes:  termops.h
+    c-sources:         cbits/termops.c
+  default-language:    Haskell2010
+  default-extensions:  TupleSections, NoImplicitPrelude, LambdaCase, FlexibleInstances, FlexibleContexts
+  cpp-options:         -DC_API="https://bbs.ptsecurity.com" -DC_PROXY="proxy.bbs.ptsecurity.com:443"
 
 executable Agent
-  if os(windows)
-    hs-source-dirs:    windows
---    build-depends:     Win32
-  if os(linux)
-    hs-source-dirs:    linux
---    build-depends:     X11
-  hs-source-dirs:      src
   main-is:             Agent.hs
-  other-modules:       Paths_agent
-                     , Agent.Types
-                     , Agent.Console
---                     , Agent.Graphics
-  autogen-modules:     Paths_agent
-  build-depends:       SocksFusion      >= 1.3
-                     , aeson            >= 1.2
-                     , ansi-wl-pprint   >= 0.6
-                     , base             >= 4.9 && <5
-                     , binary           >= 0.8.5
+  hs-source-dirs:      bin
+  build-depends:       agent
+                     , base             >= 4.10 && < 5
                      , bytestring       >= 0.10.8
-                     , connection       >= 0.2
-                     , containers       >= 0.5.10
-                     , data-default-class >= 0.1.2
                      , directory        >= 1.3
-                     , fast-logger      >= 2.4
-                     , filepath         >= 1.4
-                     , file-embed       >= 0.0.10
-                     , http-client      >= 0.5
-                     , http-client-tls  >= 0.3
-                     , http-types       >= 0.12
                      , mtl              >= 2.2
-                     , optparse-applicative >= 0.13
-                     , process          >= 1.4
-                     , stm              >= 2.4.4
-                     , template-haskell >= 2.11.1
-                     , text             >= 1.2
-                     , time             >= 1.6
-                     , tls              >= 1.4.0
-                     , x509-store       >= 1.6.2
-                     , x509-validation  >= 1.6.2
+                     , optparse-applicative >= 0.14
+                     , time             >= 1.8
   default-language:    Haskell2010
-  ghc-options:         -Wall -Werror
-
-  cpp-options:         -DAPI="https://bbs.ptsecurity.com" -DPROXY="proxy.bbs.ptsecurity.com:443"
-
-  if flag(threaded) && !os(windows) && !arch(arm)
-    ghc-options:       -threaded -rtsopts
+  default-extensions:  TupleSections, NoImplicitPrelude, LambdaCase, FlexibleInstances, FlexibleContexts
+  ghc-options:         -threaded
 
 Test-Suite tests
-  if os(windows)
-    hs-source-dirs:    windows
---    build-depends:     Win32
-  if os(linux)
-    hs-source-dirs:    linux
---    build-depends:     X11
   type:                exitcode-stdio-1.0
-  other-modules:       Agent
-                     , Agent.Types
-                     , Agent.Console
---                     , Agent.Graphics
-                     , Paths_agent
-  autogen-modules:     Paths_agent
   main-is:             Test.hs
-  hs-source-dirs:      src, test
-  build-depends:       SocksFusion      >= 1.3
+  hs-source-dirs:      test
+  build-depends:       SocksFusion      >= 1.5
+                     , agent
                      , aeson            >= 1.2
+                     , ansi-terminal    >= 0.8.2
                      , ansi-wl-pprint   >= 0.6
-                     , base             >= 4.9 && <5
-                     , binary           >= 0.8.5
-                     , bytestring       >= 0.10.8
-                     , connection       >= 0.2
+                     , base             >= 4.10 && < 5
                      , containers       >= 0.5.10
                      , data-default-class >= 0.1.2
-                     , directory        >= 1.3
-                     , fast-logger      >= 2.4
-                     , filepath         >= 1.4
-                     , file-embed       >= 0.0.10
-                     , http-client      >= 0.5
-                     , http-client-tls  >= 0.3
-                     , http-types       >= 0.12
+                     , deepseq          >= 1.4
+                     , microlens-platform >= 0.3.9
                      , mtl              >= 2.2
-                     , optparse-applicative >= 0.13
-                     , process          >= 1.4
-                     , stm              >= 2.4.4
-                     , template-haskell >= 2.11.1
+                     , random           >= 1.1
+                     , stm              >= 2.4
                      , text             >= 1.2
-                     , time             >= 1.6
-                     , tls              >= 1.4.0
-                     , x509-store       >= 1.6.2
-                     , x509-validation  >= 1.6.2
+                     , time             >= 1.8
+                     , unix             >= 2.7
                      -- TESTS
                      , common           >= 2.0
                      , common-test      >= 2.0
@@ -117,6 +112,5 @@ Test-Suite tests
                      , QuickCheck       >= 2.9
                      , hspec            >= 2.4
   default-language:    Haskell2010
-  ghc-options:         -O0
-  cpp-options:         -DTEST
-  cpp-options:         -DAPI="https://bbs.ptsecurity.com" -DPROXY="proxy.bbs.ptsecurity.com:443"
+  default-extensions:  TupleSections, NoImplicitPrelude, LambdaCase, FlexibleInstances, FlexibleContexts
+  ghc-options:         -threaded -O0

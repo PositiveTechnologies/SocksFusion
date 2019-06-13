@@ -1,6 +1,9 @@
+---
 build:
-    split-objs: true
-resolver: lts-11.22
+    split-objs: false # doesn't work on Windows
+resolver: lts-13.4
 packages:
     - agent
     - socksfusion
+    - terminal-size
+...

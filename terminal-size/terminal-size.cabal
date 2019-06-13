@@ -1,0 +1,26 @@
+name:                  terminal-size
+version:               0.1
+stability:             stable on all operating systems
+license:               Apache
+license-file:          LICENSE
+category:              System, Console
+maintainer:            Stepanov Boris (boris.stepanov@protonmail.com)
+build-type:            Simple
+tested-with:           GHC == 8.6.3
+cabal-version:         >= 1.24
+
+library
+  exposed-modules:     System.Console.Terminal.Size
+  other-modules:       System.Console.Terminal.Size.Types
+  hs-source-dirs:      src
+  build-depends:       base             >= 4.10 && < 5
+  build-tools:         hsc2hs
+  if os(windows)
+    hs-source-dirs:    windows
+    build-depends:     Win32            >= 2.5
+    include-dirs:      include
+    includes:          ioctl-types.h
+  if os(linux)
+    hs-source-dirs:    posix
+    build-depends:     unix             >= 2.7
+  default-language:    Haskell2010

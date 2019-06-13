@@ -1,8 +1,7 @@
 {-# LANGUAGE ImplicitPrelude #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
-module Network.Socks5
-  (
+module Network.Socks5 (
    ExtSocksSyn(..)
  , SocksAck(..)
  , SocksRequest(..)
@@ -11,7 +10,7 @@ module Network.Socks5
  , SocksCommand(..)
  , SocksAtyp(..)
  , SocksReply(..)
-  ) where
+ ) where
 
 import           Data.List              (intersperse)
 import           Control.Monad          (replicateM, join)
@@ -24,10 +23,10 @@ import           Data.Binary.Get
 import           Data.Binary.Put
 import           Data.Default.Class     (Default(..))
 
---------------------------------------- Types -----------------------------------------------------
+--------------------------------------- Types ---------------------------------------------
 
--- | Additional constructor allows Controller to inform Agent about progress.
-data ExtSocksSyn = SocksInfo B.ByteString
+-- | Extended Socks Syn message.
+data ExtSocksSyn = SocksProgress Int Double -- ^ Inform Agent about scan progress.
                  | SocksSyn { socksSynMethods :: [SocksMethod] }
 
 newtype SocksAck = SocksAck { socksAckMethod :: SocksMethod }
@@ -45,21 +44,38 @@ data SocksResponse = SocksResponse { responseReply :: SocksReply
 data SocksMethod = SocksNoAuth | SocksMethodOther
 data SocksCommand = SocksConnect | SocksBind | SocksAssociate
 data SocksAtyp = SocksIPv4 | SocksIPv6 | SocksDomain
-data SocksReply = SocksSucceeded | SocksUnreachable | SocksRefused | SocksReplyOther
+data SocksReply = SocksSucceeded | SocksFailure | SocksNotAllowed | SocksNetUnreachable
+                | SocksHostUnreachable | SocksRefused | SocksTTLExpired
+                | SocksCommNotSupported | SocksAddrNotSupported | SocksReplyOther
 
---------------------------------------- Instances -------------------------------------------------
+--------------------------------------- Instances -----------------------------------------
+
+deriving instance Eq ExtSocksSyn
+deriving instance Eq SocksAck
+deriving instance Eq SocksRequest
+deriving instance Eq SocksResponse
+deriving instance Eq SocksMethod
+deriving instance Eq SocksCommand
+deriving instance Eq SocksAtyp
+deriving instance Eq SocksReply
+deriving instance Show ExtSocksSyn
+deriving instance Show SocksAck
+deriving instance Show SocksRequest
+deriving instance Show SocksResponse
+deriving instance Show SocksMethod
+deriving instance Show SocksCommand
+deriving instance Show SocksAtyp
+deriving instance Show SocksReply
+deriving instance Enum SocksReply
 
 instance Binary ExtSocksSyn where
   get = do
     v <- getWord8
     case v of
-      4 -> SocksInfo <$> (getWord32le >>= getByteString . fromIntegral)
+      4 -> SocksProgress <$> get <*> get
       5 -> SocksSyn <$> (getWord8 >>= flip replicateM get . fromIntegral)
       x -> fail ("Unknown socks request " ++ show x)
-  put (SocksInfo info) = do
-    putWord8 4
-    putWord32le $ fromIntegral $ B.length info
-    putByteString info
+  put (SocksProgress siid prog) = putWord8 4 >> put siid >> put prog
   put (SocksSyn methods) = do
     putWord8 5
     putWord8 $ fromIntegral $ length methods
@@ -159,33 +175,9 @@ instance Default SocksAtyp where
 instance Binary SocksReply where
   get = do
     r <- getWord8
-    case r of
-      0 -> return SocksSucceeded
-      3 -> return SocksUnreachable
-      5 -> return SocksRefused
-      _ -> return SocksReplyOther
-  put SocksSucceeded   = putWord8 0
-  put SocksUnreachable = putWord8 3
-  put SocksRefused     = putWord8 5
-  put SocksReplyOther  = putWord8 1
+    return $ case () of
+      _ | r >= 0 && r <= 8 -> toEnum $ fromIntegral r
+        | otherwise -> SocksReplyOther
+  put = putWord8 . fromIntegral . fromEnum
 instance Default SocksReply where
   def = SocksSucceeded
-
---------------------------------------- Test instances --------------------------------------------
-
-deriving instance Eq SocksCommand
-deriving instance Eq SocksMethod
-deriving instance Eq SocksAtyp
-deriving instance Eq ExtSocksSyn
-deriving instance Eq SocksAck
-deriving instance Eq SocksReply
-deriving instance Eq SocksRequest
-deriving instance Eq SocksResponse
-deriving instance Show SocksCommand
-deriving instance Show SocksMethod
-deriving instance Show SocksAtyp
-deriving instance Show ExtSocksSyn
-deriving instance Show SocksAck
-deriving instance Show SocksReply
-deriving instance Show SocksRequest
-deriving instance Show SocksResponse

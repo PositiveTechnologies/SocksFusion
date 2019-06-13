@@ -1,38 +1,50 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTSyntax #-}
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+------------------------------------------------------------------------------------------
+-- |
+-- Module: Agent.Types
+--
+-- Constants, configuration data types, and internal communication protocol.
+--
+------------------------------------------------------------------------------------------
 
 module Agent.Types (
- -- * Configs
+ -- * Types
+ -- ** Config
    Config(..)
  , RunConfig(..)
- , ApiConfig(..)
+ , APIConfig(..)
  , TokenConfig(..)
  , ProxyConfig(..)
+ -- ** Other types
+ , LogProgress(..)
+ , SafeURL(..)
+ , APICode(..)
+ , TokenPath(..)
  , Token(..)
- , Changeable(..)
- , SafeURL
- , safeURL
- , basicConfig
- , advancedConfig
+ , TokenSource(..)
+ , PrettyConsole(..)
  -- * Interaction
- , InputChannel
- , OutputChannel
- , Output(..)
- , Input(..)
- , newInput
- , readInput
- , writeInput
- , newOutput
- , readOutput
- , writeOutput
+ , BackChannel(..)
+ , FrontChannel(..)
+ , FrontMessage(..)
+ , BackMessage(..)
+ , UserInput(..)
+ , newChannels
+ , readBack
+ , writeBack
+ , readFront
+ , writeFront
  , logO
  -- * Constants
+ -- $Constants
  , pROXYADDR
  , aPIURL
  , certificate
@@ -42,6 +54,7 @@ module Agent.Types (
  , buildVersion
  , buildDate
  -- * Error codes
+ -- $ErrorCodes
  , errorConfiguration
  , errorInterrupt
  , errorTLS
@@ -54,6 +67,22 @@ module Agent.Types (
  , errorJSON
  , errorInternal
  , errorUnknown
+ -- * Lenses
+ -- $Lenses
+ , apiConfig
+ , proxyConfig
+ , runConfig
+ , tokenConfig
+ , debugConn
+ , ignoreSSL
+ , oneRun
+ , runTutorial
+ , skipAll
+ , apiCode
+ , apiURL
+ , tokenPath
+ , proxyAddr
+ , proxyToken
  ) where
 
 import           Prelude
@@ -65,62 +94,83 @@ import qualified Network.SocksFusion    (pVersion)
 import           Network.SocksFusion hiding (pVersion)
 import           Network.HTTP.Client    (parseUrlThrow)
 
+import           Lens.Micro.Platform    (makeLenses)
 import           Language.Haskell.TH    (runIO, stringE)
 import           Data.FileEmbed         (embedFile)
 import           System.Process         (readProcess)
+import           System.Exit
+import           System.FilePath        (normalise)
 
 import           Data.Time.Clock        (UTCTime)
 import           Data.Time.Format       (formatTime, defaultTimeLocale)
-import           System.Exit            (ExitCode)
 import           System.Environment     (lookupEnv)
 
-import           Data.Bool              (bool)
 import           Control.Monad.Reader
 import           Data.Aeson             (FromJSON(..), ToJSON(..), withObject, (.:), object, (.=))
 import           Control.Concurrent.STM
 import           Data.Default.Class
 
-
-import           Data.ByteString        (ByteString)
-import qualified Data.ByteString.Char8 as BC
+import           Data.ByteString.Char8  (ByteString)
 import           Data.Text              (Text)
+import qualified Data.Text           as T
 import           Data.Text.Encoding     (decodeUtf8, encodeUtf8)
-import           Text.Read              (Read(..))
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), bool)
+import           Text.Read              (Read(..), readPrec_to_P, readP_to_Prec)
+import           Text.ParserCombinators.ReadP (ReadP, string, count, get)
+import           Data.String            (words)
+import           Data.Bifunctor         (bimap)
+import           Data.Semigroup         (Sum(..))
+
+-- Orphan instances because we need Integral instance.
+deriving instance Real a => Real (Sum a)
+deriving instance Enum a => Enum (Sum a)
+deriving instance Integral a => Integral (Sum a)
 
 --------------------------------------- Constants ----------------------------------------
 
--- | Default BBS proxy server
+-- $Constants
+-- All constants except of tOKENFILE are generated at compile time and configurated for
+-- BBS project cloud.
+
+-- | Default BBS proxy server.
 pROXYADDR :: AddrPort
-pROXYADDR = read PROXY
+pROXYADDR = read C_PROXY
 
--- | Default BBS Api server
+-- | Default BBS API server.
 aPIURL :: SafeURL
-aPIURL = read API
+aPIURL = read C_API
 
--- | BBS proxy certificate
+-- | BBS proxy certificate.
 certificate :: ByteString
 certificate = $(embedFile "res/rootCert.pem")
 
--- | Default token file
+-- | Default token file.
 tOKENFILE :: String
 tOKENFILE = "RemoteAgent.token"
 
+-- | Generated at compile time.
 buildDate :: String
 buildDate = $(runIO (readProcess "date" ["+%d %b %G"] "") >>= stringE)
 
+-- | Generated at compile time.
 buildVersion :: Maybe String
 buildVersion = $(runIO (lookupEnv "DEVOPS_BUILD_VERSION") >>= \case
   Nothing -> [|Nothing|]
   Just s -> [|Just s|])
 
--- | Agent version
+-- | Agent version.
 aVersion :: Version
 aVersion = Paths_agent.version
 
--- | Protocol version
+-- | Protocol version.
 pVersion :: Version
 pVersion = Network.SocksFusion.pVersion
+
+--------------------------------------- Error codes --------------------------------------
+
+-- $ErrorCodes
+-- Agent can fail at some actions. These error codes will be thrown in different
+-- contexts and logged for future investigation.
+--
 
 errorConfiguration :: Int
 errorConfiguration = 1
@@ -147,103 +197,148 @@ errorInternal = 11
 errorUnknown :: Int
 errorUnknown = 40
 
---------------------------------------- Config -------------------------------------------
+--------------------------------------- Types --------------------------------------------
 
--- | Helper to prevent invalid urls.
+-- | Wrapper for custom Show/Read instances.
+newtype SafeURL = SafeURL { safeURL :: String }             deriving Eq
+-- | Wrapper for custom Show/Read instances.
+newtype APICode = AC String
+-- | Wrapper for custom Show/Read instances.
+newtype TokenPath = TP FilePath
+-- | Wrapper for custom Read instance.
+newtype LogProgress = LP Int
 
-newtype SafeURL = SafeURL String                  deriving Eq
+-- | Used for incapsulating data in TextBlocks.
+class PrettyConsole a where
+  render :: Integral n
+         => n        -- ^ Width of the frame.
+         -> a        -- ^ Data.
+         -> [Text]   -- ^ Output lines.
 
-safeURL :: SafeURL -> String
-safeURL (SafeURL s) = s
+-- | Agent identification token.
+data Token = Token { tokenString :: ByteString
+                   , accessTime :: UTCTime
+                   , createTime :: UTCTime
+                   , tokenSource :: TokenSource }
 
-instance Read SafeURL where
-  readsPrec _ s = do
-    void $ either (fail . show) pure $ parseUrlThrow s
-    pure (SafeURL s, "")
+-- | Type of the token.
+data TokenSource = Loaded    -- ^ Token was found in the local storage.
+                 | Explicit  -- ^ Token was given explicitly.
+                 | Received  -- ^ Token was just received via web API.
 
-instance Show SafeURL where
-  show (SafeURL s) = show s
 
--- | Helper for State monad
-class Changeable b a | a -> b where
-  change :: (a -> a) -> b -> b
+-- | Agent configuration.
+data Config = Config { _runConfig :: RunConfig
+                     , _apiConfig :: APIConfig
+                     , _tokenConfig :: TokenConfig
+                     , _proxyConfig :: ProxyConfig }
 
-data Config = Config { runConfig :: RunConfig
-                     , apiConfig :: ApiConfig
-                     , tokenConfig :: TokenConfig
-                     , proxyConfig :: ProxyConfig }
+-- | Run configuration.
+data RunConfig = RunConfig {
+   _skipAll :: Bool               -- ^ Run agent without user interaction.
+ , _runTutorial :: Bool           -- ^ Start tutorial mode.
+ , _ignoreSSL :: Bool             -- ^ Ignore SSL errors and show them as warnings.
+ , _debugConn :: Bool             -- ^ Log proxy requests.
+ , _oneRun :: Bool                -- ^ Exit agent after a scan or any error.
+ }
 
-data RunConfig = RunConfig { skipAll :: Bool
-                           , runTutorial :: Bool
-                           , ignoreSSL :: Bool
-                           , debugConn :: Bool
-                           , oneRun :: Bool }
+-- | API configuration.
+data APIConfig = APIConfig {
+   _apiURL :: SafeURL             -- ^ URL of the API server.
+ , _apiCode :: APICode            -- ^ Activation code obtained on the website.
+ }
 
-data ApiConfig = ApiConfig { apiURL :: SafeURL
-                           , apiCode :: ByteString }
+-- | Local tokens configuration.
+data TokenConfig = TokenConfig {
+   _tokenPath :: TokenPath        -- ^ Path to the local agents file.
+ }
 
-data TokenConfig = TokenConfig { tokenPath :: FilePath }
-
-data ProxyConfig = ProxyConfig { proxyAddr :: AddrPort
-                               , proxyToken :: Maybe ByteString }
+-- | Proxying configuration.
+data ProxyConfig = ProxyConfig {
+   _proxyAddr :: AddrPort         -- ^ BBS Proxy address.
+ , _proxyToken :: Maybe Token     -- ^ Token string used for scanning.
+ }
 
 instance Default RunConfig where
-  def = RunConfig { skipAll = False
-                  , runTutorial = False
-                  , ignoreSSL = False
-                  , debugConn = False
-                  , oneRun = False }
-
-instance Changeable Config RunConfig where
-  change f c = let x = runConfig c in c { runConfig = f x }
-
-instance Changeable Config ApiConfig where
-  change f c = let x = apiConfig c in c { apiConfig = f x }
-
-instance Changeable Config TokenConfig where
-  change f c = let x = tokenConfig c in c { tokenConfig = f x }
-
-instance Changeable Config ProxyConfig where
-  change f c = let x = proxyConfig c in c { proxyConfig = f x }
+  def = RunConfig { _skipAll = False
+                  , _runTutorial = False
+                  , _ignoreSSL = False
+                  , _debugConn = False
+                  , _oneRun = False }
 
 --------------------------------------- Interactive --------------------------------------
 
-newtype InputChannel = InputChannel (TQueue Input)
-newtype OutputChannel = OutputChannel (TQueue Output)
+-- | FIFO channel for backend tasks.
+newtype BackChannel = BackChannel (TQueue BackMessage)
+-- | FIFO channel for frontend tasks.
+newtype FrontChannel = FrontChannel (TQueue FrontMessage)
 
-data Input = Exit ExitCode | ConfigChange Config | SaveTokens [Token]
-           | RunApi | RunToken | RunProxy
+-- | Representation of backend tasks.
+data BackMessage =
+   ConfigChange Config  -- ^ Update configuration storen in backend memory.
+ | SaveTokens [Token]   -- ^ Merge new tokens in the local token file.
+ | StopProxy            -- ^ Cancel proxying.
+ | RunAPI               -- ^ Reach API server and exchange an activation code for a token.
+ | RunToken             -- ^ Read tokens from the local storage.
+ | RunProxy             -- ^ Run proxying.
 
-data Output = ShowMessage Text
-            | FailRun ExitCode
-            | FinishApi Token
-            | FinishToken [Token]
-            | FinishProxy ExitCode
+-- | Representation of frontend tasks.
+data FrontMessage =
+   LogMessage Text                         -- ^ Show message to the user.
+ | Progress Double                         -- ^ Update progress.
+ | Abort ExitCode                          -- ^ Stop interaction and throw the exit code.
+ | FinishAPI (Either ExitCode Token)       -- ^ API request was finished.
+ | FinishToken (Either ExitCode [Token])   -- ^ Tokens loading was finished.
+ | FinishProxy (Either ExitCode ())        -- ^ Proxying task was finished.
+ | UserInput UserInput                     -- ^ User causes new event.
 
-newInput :: IO InputChannel
-newInput = InputChannel <$> atomically newTQueue
-newOutput :: IO OutputChannel
-newOutput = OutputChannel <$> atomically newTQueue
+-- | Possible user events.
+data UserInput = ResizeWindow Int Int | KeyChar Char | KeyNum Int
+               | KeyBackspace | KeyDelete | KeyEnter | KeyEsc
+               | KeyUp | KeyDown | KeyLeft | KeyRight
 
-readInput :: (MonadIO m, MonadReader (InputChannel, a) m) => m Input
-readInput = asks fst >>= (\(InputChannel ch) -> liftIO $ atomically $ readTQueue ch)
-writeInput :: (MonadIO m, MonadReader (a, InputChannel) m) => Input -> m ()
-writeInput msg = asks snd >>= (\(InputChannel ch) -> liftIO $ atomically $ writeTQueue ch msg)
+-- | Init empty channels.
+newChannels :: IO (BackChannel, FrontChannel)
+newChannels = curry (bimap BackChannel FrontChannel) <$> atomically newTQueue
+                                                     <*> atomically newTQueue
 
-readOutput :: (MonadIO m, MonadReader (OutputChannel, a) m) => m Output
-readOutput = asks fst >>= (\(OutputChannel ch) -> liftIO $ atomically $ readTQueue ch)
-writeOutput :: (MonadIO m, MonadReader (a, OutputChannel) m) => Output -> m ()
-writeOutput msg = asks snd >>= (\(OutputChannel ch) -> liftIO $ atomically $ writeTQueue ch msg)
+-- | Take a message from backend channel blocking.
+readBack :: (MonadIO m, MonadReader (BackChannel, a) m) => m BackMessage
+readBack = asks fst >>= (\(BackChannel ch) -> liftIO $ atomically $ readTQueue ch)
+-- | Send a message on the backend.
+writeBack :: (MonadIO m, MonadReader (a, BackChannel) m) => BackMessage-> m ()
+writeBack msg = asks snd >>= (\(BackChannel ch) -> liftIO $ atomically $ writeTQueue ch msg)
 
--- | To avoid MonadIO in high load proxy code
-logO :: OutputChannel -> Text -> IO ()
-logO (OutputChannel output) = atomically . writeTQueue output . ShowMessage
+-- | Take a message from frontend channel blocking.
+readFront :: (MonadIO m, MonadReader (FrontChannel, a) m) => m FrontMessage
+readFront = asks fst >>= (\(FrontChannel ch) -> liftIO $ atomically $ readTQueue ch)
+-- | Send a message on the frontend.
+writeFront :: (MonadIO m, MonadReader (a, FrontChannel) m) => FrontMessage -> m ()
+writeFront msg = asks snd >>= (\(FrontChannel ch) -> liftIO $ atomically $ writeTQueue ch msg)
 
---------------------------------------- Tokens -------------------------------------------
+-- | This function is used for avoiding MonadIO in high load proxy code.
+logO :: FrontChannel -> Text -> IO ()
+logO (FrontChannel output) = atomically . writeTQueue output . LogMessage
 
-data Token = Token { tokenString :: ByteString
-                   , accessTime :: UTCTime
-                   , createTime :: UTCTime }
+--------------------------------------- Lenses -------------------------------------------
+
+-- $Lenses
+-- Autogenerated lens functions.
+
+makeLenses ''Config
+makeLenses ''RunConfig
+makeLenses ''APIConfig
+makeLenses ''TokenConfig
+makeLenses ''ProxyConfig
+
+--------------------------------------- Instances ----------------------------------------
+
+instance Read LogProgress where
+  readPrec = readP_to_Prec $ \d -> do
+    void $ count 18 get                 -- skip timestamp
+    void $ string "Scan progress: "
+    p <- readPrec_to_P readPrec d :: ReadP Double
+    return $ LP $ round p
 
 instance Eq Token where
   tx == ty = tokenString tx == tokenString ty
@@ -260,84 +355,62 @@ instance FromJSON Token where
   parseJSON = withObject "dict" $ \v -> Token <$> (encodeUtf8 <$> v .: "token")
                                               <*>  v .: "atime"
                                               <*>  v .: "ctime"
+                                              <*> pure Loaded
 
---------------------------------------- Pretty -------------------------------------------
+instance Read SafeURL where
+  readsPrec _ s = do
+    void $ either (fail . show) pure $ parseUrlThrow s
+    pure (SafeURL s, "")
 
-prettyIgnore :: RunConfig -> Doc
-prettyIgnore = ("Ignore ssl errors:" <+>) . bool (pretty False) (bold $ pretty True) . ignoreSSL
+instance Show SafeURL where
+  show (SafeURL s) = s
 
-prettyDebug :: RunConfig -> Doc
-prettyDebug = ("Debug mode:" <+>) . bool (pretty False) (bold $ pretty True) . debugConn
+instance Read APICode where
+  readsPrec _ s = pure $ case words s of
+    [] -> (AC "", "")
+    x:_ -> (AC x, "")
 
-prettyOnce :: RunConfig -> Doc
-prettyOnce = ("Exit after scan:" <+>) . pretty . oneRun
+instance Show APICode where
+  show (AC s) = s
 
-prettyApiUrl :: ApiConfig -> Doc
-prettyApiUrl = ("API server:" <+>) . (bool bold id . (== aPIURL) <*> text . safeURL) . apiURL
+instance Show TokenPath where
+  show (TP s) = s
 
-prettyCode :: ApiConfig -> Doc
-prettyCode api = "Activation code:" <+> bold (case BC.unpack (apiCode api) of
-                                                "" -> dquotes empty
-                                                c -> text c)
+instance Read TokenPath where
+  readsPrec _ s = pure (TP $ normalise s, "")
 
-prettyPath :: TokenConfig -> Doc
-prettyPath = ("Token path:" <+>) . bold . text . tokenPath
+instance PrettyConsole Bool where
+  render _ = pure . T.pack . show
 
-prettyProxyUrl :: ProxyConfig -> Doc
-prettyProxyUrl = ("Proxy server:" <+>) . (bool bold id . (== pROXYADDR) <*> text . show) . proxyAddr
+instance PrettyConsole AddrPort where
+  render _ = pure . T.pack . show
 
-prettyToken :: ProxyConfig -> Doc
-prettyToken = ("Using token:" <+>) . bold . maybe "undefined" (text . show) . proxyToken
+instance PrettyConsole SafeURL where
+  render _ = pure . T.pack . show
 
-basicConfig :: Config -> Doc
-basicConfig (Config _ api token _) =
-  "Basic configuration:" <> line <> indent 4 (vsep $ map (\(n, s) -> parens (int n) <+> s)
-                                                   $ zip [1..] [ prettyCode api
-                                                               , prettyPath token ])
+instance PrettyConsole TokenPath where
+  render _ = pure . T.pack . show
 
-advancedConfig :: Config -> Doc
-advancedConfig (Config run api token proxy) =
-  "Advanced configuration:" <> line <> indent 4 (vsep $ map (\(n, s) -> parens (int n) <+> s)
-                                                      $ zip [1..] [ prettyCode api
-                                                                  , prettyPath token
-                                                                  , prettyToken proxy
-                                                                  , prettyApiUrl api
-                                                                  , prettyProxyUrl proxy
-                                                                  , prettyIgnore run
-                                                                  , prettyDebug run
-                                                                  , prettyOnce run ])
+instance PrettyConsole APICode where
+  render _ = pure . T.pack . show
 
-instance Pretty Config where
-  pretty config =
-    "Configuration:" <> line <> indent 4 (vsep [ pretty (runConfig config)
-                                               , pretty (tokenConfig config)
-                                               , pretty (apiConfig config)
-                                               , pretty (proxyConfig config) ])
+instance PrettyConsole String where
+  render n = render n . T.pack
 
-instance Pretty RunConfig where
-  pretty run = "Agent configuration:" <> line <> indent 4 (vsep [ prettyIgnore run
-                                                                , prettyDebug run
-                                                                , prettyOnce run ])
+instance PrettyConsole Text where
+  render n = pure . T.take (fromIntegral n)
 
-instance Pretty TokenConfig where
-  pretty token = "Token configuration: " <> line <> indent 4 (prettyPath token)
+instance PrettyConsole [Text] where
+  render n ts = ts >>= render n
 
-instance Pretty ApiConfig where
-  pretty api = "API configuration: " <> line <> indent 4 (vsep [ prettyApiUrl api
-                                                               , prettyCode api ])
-
-instance Pretty ProxyConfig where
-  pretty proxy = "Proxy configuration: " <> line <> indent 4 (vsep [ prettyProxyUrl proxy
-                                                                   , prettyToken proxy ])
-
-instance Pretty Token where
-  pretty token = vsep [
-      fill 20 "Token:" <+> text (BC.unpack $ tokenString token)
-    , fill 20 "Created:" <+> showT (createTime token)
-    , fill 20 "Last active:" <+> showT (accessTime token)
-    ]
+instance PrettyConsole Token where
+  render n (Token str atime ctime src)
+    | n >= 95   = pure $ T.intercalate ", " total
+    | otherwise = T.take (fromIntegral n) <$> total
     where
-    showT = text . formatTime defaultTimeLocale "%b %d %X"
-  prettyList tokens = "(*)"
-                  <+> align (vsep (map (\(x, y) -> parens (int x) <+> align (pretty y))
-                                 $ zip [1..] tokens))
+    total = ["Token: " `T.append` decodeUtf8 str, formatC, formatA]
+    formatC = T.pack $ formatTime defaultTimeLocale "Created: %b %d %X" ctime
+    formatA = case src of
+        Loaded -> T.pack $ formatTime defaultTimeLocale "Last active: %b %d %X" atime
+        Explicit -> "Explicit"
+        Received -> "Just received from API"
